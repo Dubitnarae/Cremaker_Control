@@ -42,6 +42,16 @@ namespace CremakerControl
                 && Parser.KindOf("M220") == "" && Parser.KindOf("M220 S90") == "feed" && Parser.KindOf("M115") == "");
             Check("주석 지우기", Link.StripComment("G28 ; 홈") == "G28" && Link.StripComment("; 전부 주석") == "");
 
+            // 메인보드 펌웨어 판정 (M115 줄: v1.1·v1.2 는 bin 안 문자열, 06-09 는 이 PC 프린터에서 받은 것)
+            bool latest;
+            string detail;
+            Check("v1.2 판정", Parser.BoardVersion("FIRMWARE_NAME:Marlin 2.0.8.1 (Jul 12 2022 10:42:43) SOURCE_CODE_URL:github.com/MarlinFirmware/Marlin PROTOCOL_VERSION:1.0 MACHINE_TYPE:Cremaker_V1.2 EXTRUDER_COUNT:1", out latest, out detail) == "v1.2"
+                && latest && detail == "Marlin 2.0.8.1, 2022-07-12 빌드, 기종 Cremaker_V1.2");
+            Check("v1.1 판정", Parser.BoardVersion("FIRMWARE_NAME:Marlin 2.0.8.1 (Mar  7 2022 10:38:07) SOURCE_CODE_URL:github.com/MarlinFirmware/Marlin PROTOCOL_VERSION:1.0 MACHINE_TYPE:Cremaker EXTRUDER_COUNT:1", out latest, out detail) == "v1.1" && !latest);
+            Check("06-09 빌드 = 확인 안 됨", Parser.BoardVersion("FIRMWARE_NAME:Marlin 2.0.8.1 (Jun  9 2022 10:11:27) SOURCE_CODE_URL:github.com/MarlinFirmware/Marlin PROTOCOL_VERSION:1.0 MACHINE_TYPE:Cremaker EXTRUDER_COUNT:1", out latest, out detail) == "확인 안 된 빌드"
+                && !latest && detail.Contains("2022-06-09"));
+            Check("M115 아님", Parser.BoardVersion("ok", out latest, out detail) == "");
+
             // 조작 감지 — 화면에서 예열(PC 명령 없음) → 출처 '프린터'
             var d = new Detector();
             var p = new PrinterState();

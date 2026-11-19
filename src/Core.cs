@@ -87,6 +87,28 @@ namespace CremakerControl
             return None;
         }
 
+        // M115 → 메인보드 펌웨어 판정. 원본 펌웨어 폴더의 bin 문자열로 확인한 빌드 날짜:
+        // v1.1 = "Mar  7 2022" (MACHINE_TYPE:Cremaker), v1.2 = "Jul 12 2022" (MACHINE_TYPE:Cremaker_V1.2).
+        // v1.1 → v1.2 차이는 기종 이름·조명 상태 문구·레벨링 문구뿐이라 이 프로그램 동작은 같다.
+        // 화면(TFT) v1.3 → v1.4 도 버전 표시만 바뀌었고, 화면은 USB 와 따로 통신하므로 영향 없음.
+        public const string LatestBoard = "v1.2";
+        static readonly Regex RxFw = new Regex(@"FIRMWARE_NAME:Marlin (\S+) \((\w{3} +\d+ \d{4})[^)]*\).*MACHINE_TYPE:(\S+)");
+
+        public static string BoardVersion(string m115, out bool latest, out string detail)
+        {
+            latest = false;
+            detail = "";
+            var m = RxFw.Match(m115);
+            if (!m.Success) return "";
+            string date = Regex.Replace(m.Groups[2].Value, " +", " ");
+            DateTime d;
+            string iso = DateTime.TryParseExact(date, "MMM d yyyy", Inv, DateTimeStyles.None, out d) ? d.ToString("yyyy-MM-dd", Inv) : date;
+            detail = "Marlin " + m.Groups[1].Value + ", " + iso + " 빌드, 기종 " + m.Groups[3].Value;
+            if (date == "Jul 12 2022" || m.Groups[3].Value == "Cremaker_V1.2") { latest = true; return "v1.2"; }
+            if (date == "Mar 7 2022") return "v1.1";
+            return "확인 안 된 빌드";
+        }
+
         // 자동 보고처럼 계속 오는 줄 (콘솔에서 숨기기용)
         public static bool IsReport(string line)
         {

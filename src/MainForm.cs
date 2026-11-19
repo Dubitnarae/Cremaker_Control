@@ -123,7 +123,7 @@ namespace CremakerControl
             lbMode = Status("상태");
             lbSd = Status("SD 출력");
             lbSpeed = Status("속도 / 유량");
-            lbFw = Lbl(left, "", 10, y, 230, 60);
+            lbFw = Lbl(left, "", 10, y, 230, 84);
             lbFw.ForeColor = Color.DimGray;
 
             // 오른쪽 조작
@@ -458,8 +458,14 @@ namespace CremakerControl
 
         void ShowFw()
         {
-            var m = System.Text.RegularExpressions.Regex.Match(fwName, @"FIRMWARE_NAME:(.*?) SOURCE_CODE_URL.*MACHINE_TYPE:(\S+)");
-            lbFw.Text = m.Success ? "펌웨어: " + m.Groups[1].Value + "\n기종: " + m.Groups[2].Value : "";
+            bool latest;
+            string detail;
+            string ver = Parser.BoardVersion(fwName, out latest, out detail);
+            if (ver == "") { lbFw.Text = ""; return; }
+            string head = "메인보드 펌웨어 " + ver + (latest ? " (최신)" : " — " + Parser.LatestBoard + " 업데이트 권장");
+            lbFw.Text = head + "\n" + detail;
+            lbFw.ForeColor = latest ? Color.DimGray : Color.DarkOrange;
+            AddEvent(new Ev(DateTime.Now, "상태", head + " · " + detail));
         }
 
         void SyncButtons()
