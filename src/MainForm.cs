@@ -445,7 +445,7 @@ namespace CremakerControl
             if (st.HasPos)
                 SetText(lbPos, string.Format(Inv, "X {0,8:0.00}\nY {1,8:0.00}\nZ {2,8:0.00}\nE {3,8:0.00}", st.X, st.Y, st.Z, st.E));
             bool printing = det.LooksPrinting(st, Ts(now));
-            SetText(lbMode, link == null || !link.Connected ? "-" : printing ? "출력 중" : det.Moving ? "이동 중" : st.Tt > 0 || st.Bt > 0 ? "가열 · 대기" : "대기");
+            SetText(lbMode, link == null || !link.Connected ? "-" : printing ? "출력 중" : det.Busy ? "처리 중" : det.Moving ? "이동 중" : st.Tt > 0 || st.Bt > 0 ? "가열 · 대기" : "대기");
             SetText(lbSd, st.SdPrinting ? st.SdPercent.ToString("0.0", Inv) + " %" : "출력 안 함");
             SetText(lbSpeed, (st.Feed >= 0 ? st.Feed + " %" : "-") + " / " + (st.Flow >= 0 ? st.Flow + " %" : "-"));
             bool conn = link != null && link.Connected;

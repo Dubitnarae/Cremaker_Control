@@ -28,6 +28,8 @@ namespace CremakerControl
         public double T = double.NaN, Tt, B = double.NaN, Bt;
         public int TPow, BPow;
         public double X = double.NaN, Y, Z, E;
+        public long CX, CY, CZ;   // 모터 스텝 카운트 (M114 "Count") — 홈 동작처럼 좌표가 그대로일 때도 바뀐다
+        public bool HasCount;
         public bool SdPrinting;
         public long SdPos, SdSize;
         public int Feed = -1, Flow = -1;
@@ -47,18 +49,20 @@ namespace CremakerControl
         static readonly Regex RxB = new Regex(@"(?:^|\s)B:(-?[\d.]+)\s*/(-?[\d.]+)");
         static readonly Regex RxTPow = new Regex(@"(?:^|\s)@:(\d+)");
         static readonly Regex RxBPow = new Regex(@"B@:(\d+)");
-        static readonly Regex RxPos = new Regex(@"^X:(-?[\d.]+) Y:(-?[\d.]+) Z:(-?[\d.]+) E:(-?[\d.]+)");
+        static readonly Regex RxPos = new Regex(@"^X:(-?[\d.]+) Y:(-?[\d.]+) Z:(-?[\d.]+) E:(-?[\d.]+)(?: Count X:(-?\d+) Y:(-?\d+) Z:(-?\d+))?");
         static readonly Regex RxSd = new Regex(@"SD printing byte (\d+)/(\d+)");
         static readonly Regex RxFeed = new Regex(@"FR:(\d+)%");
         static readonly Regex RxFlow = new Regex(@"E\d+ Flow: ?(\d+)%");
 
         static double D(string s) { return double.Parse(s, Inv); }
 
-        public const int None = 0, Temp = 1, Pos = 2, Sd = 4, Speed = 8;
+        public const int None = 0, Temp = 1, Pos = 2, Sd = 4, Speed = 8, Busy = 16;
 
         public static int Apply(string line, PrinterState s)
         {
             Match m;
+            // G28·G29·M109 처럼 오래 걸리는 명령 중 2초마다 온다 (화면에서 보낸 명령이어도 USB로 온다)
+            if (line.StartsWith("echo:busy")) return Busy;
             if ((m = RxT.Match(line)).Success && (line.StartsWith("T:") || line.StartsWith("ok T:") || line.StartsWith(" T:")))
             {
                 s.T = D(m.Groups[1].Value); s.Tt = D(m.Groups[2].Value);
@@ -70,6 +74,11 @@ namespace CremakerControl
             if ((m = RxPos.Match(line)).Success)
             {
                 s.X = D(m.Groups[1].Value); s.Y = D(m.Groups[2].Value); s.Z = D(m.Groups[3].Value); s.E = D(m.Groups[4].Value);
+                if (m.Groups[5].Success)
+                {
+                    s.CX = long.Parse(m.Groups[5].Value, Inv); s.CY = long.Parse(m.Groups[6].Value, Inv); s.CZ = long.Parse(m.Groups[7].Value, Inv);
+                    s.HasCount = true;
+                }
                 return Pos;
             }
             if ((m = RxSd.Match(line)).Success)
@@ -152,6 +161,9 @@ namespace CremakerControl
         bool moving, tReached = true, bReached = true;
         double lastMoveTs = -1e9, lastETs = -1e9, moveStartE;
         string moveSrc = "";
+        bool moveLogical, busy;
+        double busyStart, lastBusy;
+        long startCX, startCY, startCZ;
         int lastSdTenth = -1;
 
         public void PcSent(string kind, double ts) { if (kind != "") lastPc[kind] = ts; }
@@ -160,6 +172,13 @@ namespace CremakerControl
         {
             double t;
             return lastPc.TryGetValue(kind, out t) && ts - t <= Window ? "PC" : "프린터";
+        }
+
+        // 종류와 상관없이 PC가 최근에 명령을 보냈는지 (처리 중 판단용)
+        string SrcAny(double ts)
+        {
+            foreach (var t in lastPc.Values) if (ts - t <= Window) return "PC";
+            return "프린터";
         }
 
         static string F(double v) { return v.ToString("0.##", Parser.Inv); }
@@ -191,24 +210,41 @@ namespace CremakerControl
             }
             if ((what & Parser.Pos) != 0 && prev.HasPos)
             {
-                bool changed = s.X != prev.X || s.Y != prev.Y || s.Z != prev.Z || s.E != prev.E;
+                bool logical = s.X != prev.X || s.Y != prev.Y || s.Z != prev.Z || s.E != prev.E;
+                bool counts = s.HasCount && prev.HasCount && (s.CX != prev.CX || s.CY != prev.CY || s.CZ != prev.CZ);
                 if (s.E != prev.E) lastETs = ts;
-                if (changed)
+                if (logical || counts)
                 {
                     lastMoveTs = ts;
                     if (!moving)
                     {
-                        moving = true; moveSrc = Src("move", ts); moveStartE = prev.E;
-                        evs.Add(new Ev(now, moveSrc, "이동 시작 (X " + F(prev.X) + " Y " + F(prev.Y) + " Z " + F(prev.Z) + ")"));
+                        moving = true; moveSrc = Src("move", ts); moveStartE = prev.E; moveLogical = false;
+                        startCX = prev.CX; startCY = prev.CY; startCZ = prev.CZ;
+                        evs.Add(new Ev(now, moveSrc, logical
+                            ? "이동 시작 (X " + F(prev.X) + " Y " + F(prev.Y) + " Z " + F(prev.Z) + ")"
+                            : "모터 움직임 시작 — 좌표는 그대로 (홈 동작 등)"));
                     }
+                    moveLogical |= logical;
                 }
             }
-            if (moving && ts - lastMoveTs >= StopAfter)
+            if ((what & Parser.Busy) != 0)
+            {
+                if (!busy) { busy = true; busyStart = ts; evs.Add(new Ev(now, SrcAny(ts), "프린터 처리 중 (홈·레벨링·가열 대기 같은 오래 걸리는 명령)")); }
+                lastBusy = ts;
+            }
+            if (busy && ts - lastBusy > 3.5)   // busy 는 2초마다 오므로 3.5초 안 오면 끝난 것
+            {
+                busy = false;
+                evs.Add(new Ev(now, "상태", "처리 끝 (약 " + (lastBusy - busyStart + 2).ToString("0", Parser.Inv) + "초 걸림)"));
+            }
+            if (moving && !busy && ts - lastMoveTs >= StopAfter)   // 처리 중(홈 등)에는 잠깐 멈춰도 같은 동작으로 본다
             {
                 moving = false;
                 double de = s.E - moveStartE;
-                evs.Add(new Ev(now, moveSrc, "이동 멈춤 (X " + F(s.X) + " Y " + F(s.Y) + " Z " + F(s.Z)
-                    + (Math.Abs(de) > 0.001 ? ", E " + (de > 0 ? "+" : "") + F(de) + " mm" : "") + ")"));
+                string cnt = s.HasCount ? "모터 카운트 X " + startCX + "→" + s.CX + " Y " + startCY + "→" + s.CY + " Z " + startCZ + "→" + s.CZ : "";
+                evs.Add(new Ev(now, moveSrc, moveLogical
+                    ? "이동 멈춤 (X " + F(s.X) + " Y " + F(s.Y) + " Z " + F(s.Z) + (Math.Abs(de) > 0.001 ? ", E " + (de > 0 ? "+" : "") + F(de) + " mm" : "") + ")"
+                    : "모터 움직임 멈춤 — 좌표 그대로 X " + F(s.X) + " Y " + F(s.Y) + " Z " + F(s.Z) + " (" + cnt + ")"));
             }
             if ((what & Parser.Sd) != 0)
             {
@@ -231,6 +267,7 @@ namespace CremakerControl
         }
 
         public bool Moving { get { return moving; } }
+        public bool Busy { get { return busy; } }
     }
 
     // logs\날짜\시각_state.csv (1초마다 상태), _events.csv (사건), _serial.txt (통신 원문)
@@ -249,7 +286,7 @@ namespace CremakerControl
             state = new StreamWriter(Path.Combine(Dir, Prefix + "_state.csv"), true, bom) { AutoFlush = true };
             events = new StreamWriter(Path.Combine(Dir, Prefix + "_events.csv"), true, bom) { AutoFlush = true };
             serial = new StreamWriter(Path.Combine(Dir, Prefix + "_serial.txt"), true, new UTF8Encoding(false)) { AutoFlush = true };
-            state.WriteLine("시각,노즐(°C),노즐 목표,베드(°C),베드 목표,노즐 출력(0-127),베드 출력(0-127),X,Y,Z,E,SD 출력 중,SD 진행(%),속도(%),유량(%)");
+            state.WriteLine("시각,노즐(°C),노즐 목표,베드(°C),베드 목표,노즐 출력(0-127),베드 출력(0-127),X,Y,Z,E,SD 출력 중,SD 진행(%),속도(%),유량(%),모터 X 카운트,모터 Y 카운트,모터 Z 카운트");
             events.WriteLine("시각,출처,내용");
         }
 
@@ -263,7 +300,8 @@ namespace CremakerControl
                 Ts(t), N(s.T), N(s.Tt), N(s.B), N(s.Bt), s.HasTemp ? s.TPow.ToString(Parser.Inv) : "", s.HasTemp ? s.BPow.ToString(Parser.Inv) : "",
                 N(s.X), s.HasPos ? N(s.Y) : "", s.HasPos ? N(s.Z) : "", s.HasPos ? N(s.E) : "",
                 s.SdPrinting ? "1" : "0", s.SdPrinting ? s.SdPercent.ToString("0.0", Parser.Inv) : "",
-                s.Feed >= 0 ? s.Feed.ToString(Parser.Inv) : "", s.Flow >= 0 ? s.Flow.ToString(Parser.Inv) : "" });
+                s.Feed >= 0 ? s.Feed.ToString(Parser.Inv) : "", s.Flow >= 0 ? s.Flow.ToString(Parser.Inv) : "",
+                s.HasCount ? s.CX.ToString(Parser.Inv) : "", s.HasCount ? s.CY.ToString(Parser.Inv) : "", s.HasCount ? s.CZ.ToString(Parser.Inv) : "" });
         }
 
         public static string EventRow(Ev e) { return Ts(e.Time) + "," + Q(e.Source) + "," + Q(e.Text); }

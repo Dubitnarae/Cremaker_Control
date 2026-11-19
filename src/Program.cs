@@ -12,8 +12,8 @@ using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyProduct("Cremaker Control")]
 [assembly: System.Reflection.AssemblyCompany("KIM YEONGDO")]
 [assembly: System.Reflection.AssemblyCopyright("Copyright (c) 2026 KIM YEONGDO")]
-[assembly: System.Reflection.AssemblyVersion("0.1.1.0")]
-[assembly: System.Reflection.AssemblyFileVersion("0.1.1.0")]
+[assembly: System.Reflection.AssemblyVersion("0.1.2.0")]
+[assembly: System.Reflection.AssemblyFileVersion("0.1.2.0")]
 
 namespace CremakerControl
 {

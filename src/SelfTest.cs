@@ -94,11 +94,33 @@ namespace CremakerControl
             var e10 = Feed("FR:150%", 135);
             Check("화면 속도 변경 → 프린터", e10.Count == 1 && e10[0].Source == "프린터" && e10[0].Text == "속도 100 → 150 %");
 
+            // 홈 동작 — 좌표 그대로, 모터 카운트·busy 만 바뀜 (2026-11-19 22:27 실제 로그)
+            var dh = new Detector();
+            var ph = new PrinterState();
+            Func<string, double, List<Ev>> H = (line, t) => dh.Update(ph, Parser.Apply(line, ph), t, now);
+            H("X:-8.0000 Y:-6.0000 Z:0.0000 E:0.0000 Count X:-640 Y:-480 Z:0", 0);
+            Check("카운트 읽기", ph.HasCount && ph.CX == -640 && ph.CY == -480 && ph.CZ == 0);
+            var h1 = H("X:-8.0000 Y:-6.0000 Z:0.0000 E:0.0000 Count X:-27360 Y:-480 Z:0", 1);
+            Check("홈: 모터 움직임 시작 → 프린터", h1.Count == 1 && h1[0].Source == "프린터" && h1[0].Text.StartsWith("모터 움직임 시작"));
+            Check("busy 줄 종류", Parser.Apply("echo:busy: processing", new PrinterState()) == Parser.Busy);
+            var h2 = H("echo:busy: processing", 2.9);
+            Check("처리 중 시작", h2.Count == 1 && h2[0].Text.StartsWith("프린터 처리 중") && dh.Busy);
+            H("X:-8.0000 Y:-6.0000 Z:0.0000 E:0.0000 Count X:130 Y:-27120 Z:0", 3);
+            H("echo:busy: processing", 4.9);
+            H("X:-8.0000 Y:-6.0000 Z:0.0000 E:0.0000 Count X:130 Y:18400 Z:0", 8);
+            for (double bt = 6.9; bt <= 22.95; bt += 2) H("echo:busy: processing", bt);
+            var h3 = dh.Update(ph, Parser.None, 26.6, now);
+            Check("처리 끝 + 걸린 시간", h3.Any(e => e.Text == "처리 끝 (약 22초 걸림)") && !dh.Busy);
+            Check("모터 움직임 멈춤 + 카운트", h3.Any(e => e.Text.StartsWith("모터 움직임 멈춤") && e.Text.Contains("X -640→130 Y -480→18400")) && !dh.Moving);
+            var ch = new PrinterState();
+            Parser.Apply("X:1.0000 Y:2.0000 Z:3.0000 E:0.0000 Count X:80 Y:160 Z:2400", ch);
+            Check("상태 줄 카운트 열", LogWriter.StateRow(new DateTime(2026, 11, 19), ch).EndsWith(",80,160,2400"));
+
             // 로그 줄
             var ls = new PrinterState();
             Parser.Apply(" T:200.12 /200.00 B:60.39 /60.00 @:61 B@:127", ls);
             string row = LogWriter.StateRow(new DateTime(2026, 11, 19, 21, 0, 0), ls);
-            Check("상태 줄 (위치 없을 때 빈칸)", row == "2026-11-19 21:00:00.000,200.12,200,60.39,60,61,127,,,,,0,,,");
+            Check("상태 줄 (위치 없을 때 빈칸)", row == "2026-11-19 21:00:00.000,200.12,200,60.39,60,61,127,,,,,0,,,,,,");
             Check("사건 줄 쉼표 감싸기", LogWriter.EventRow(new Ev(new DateTime(2026, 11, 19, 21, 0, 0), "PC", "보냄: a, b")) == "2026-11-19 21:00:00.000,PC,\"보냄: a, b\"");
             string tmp = Path.Combine(Path.GetTempPath(), "cremaker_selftest_" + Guid.NewGuid().ToString("N"));
             using (var lw = new LogWriter(tmp, new DateTime(2026, 11, 19, 21, 5, 7)))
