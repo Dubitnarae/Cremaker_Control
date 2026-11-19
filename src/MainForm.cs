@@ -375,7 +375,7 @@ namespace CremakerControl
                     int what = Parser.Apply(line, st);
                     foreach (var e in det.Update(st, what, Ts(t), t)) AddEvent(e);
                     if (line.StartsWith("FIRMWARE_NAME:")) { fwName = line; ShowFw(); }
-                    if (line.StartsWith("Error:") || line.Contains("Printer halted") || line.Contains("Thermal Runaway") || line.Contains("MAXTEMP") || line.Contains("MINTEMP"))
+                    if (Parser.IsError(line))
                         AddEvent(new Ev(t, "오류", line));
                     else if (line.StartsWith("echo:") && !line.StartsWith("echo:busy") && !line.Contains("Flow:"))
                         AddEvent(new Ev(t, "프린터", line.Substring(5).Trim()));

@@ -40,6 +40,7 @@ namespace CremakerControl
             Check("자동 보고 구분", Parser.IsReport(" T:22 /0 B:22 /0") && Parser.IsReport("X:1 Y:2 Z:3 E:0 Count") && !Parser.IsReport("echo:Unknown command: \"M78\""));
             Check("명령 종류", Parser.KindOf("M104 S200") == "hotend" && Parser.KindOf("m140 s60") == "bed" && Parser.KindOf("G28 X") == "move"
                 && Parser.KindOf("M220") == "" && Parser.KindOf("M220 S90") == "feed" && Parser.KindOf("M115") == "");
+            Check("오류 줄 (한글 kill 메시지)", Parser.IsError("echo:원점 이동 실패, 재부팅 필요") && Parser.IsError("Error:Printer halted. kill() called!") && !Parser.IsError("echo:busy: processing") && !Parser.IsError("echo:E0 Flow: 100%"));
             Check("주석 지우기", Link.StripComment("G28 ; 홈") == "G28" && Link.StripComment("; 전부 주석") == "");
 
             // 메인보드 펌웨어 판정 (M115 줄: v1.1·v1.2 는 bin 안 문자열, 06-09 는 이 PC 프린터에서 받은 것)

@@ -118,6 +118,14 @@ namespace CremakerControl
             return "확인 안 된 빌드";
         }
 
+        // 프린터를 멈추게 하는 오류 줄. 이 펌웨어는 한국어라 kill 메시지가 한글로 온다
+        // (language_ko_KR.h: "원점 이동 실패, 재부팅 필요", "최대 온도 초과" 등). 이 줄 뒤로는 재부팅 전까지 응답이 없다.
+        public static bool IsError(string line)
+        {
+            return line.StartsWith("Error:") || line.Contains("Printer halted") || line.Contains("Thermal Runaway") || line.Contains("MAXTEMP") || line.Contains("MINTEMP")
+                || line.Contains("Homing Failed") || line.Contains("실패") || line.Contains("재부팅") || line.Contains("초과") || line.Contains("미달") || line.Contains("폭주");
+        }
+
         // 자동 보고처럼 계속 오는 줄 (콘솔에서 숨기기용)
         public static bool IsReport(string line)
         {

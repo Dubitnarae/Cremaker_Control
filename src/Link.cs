@@ -87,7 +87,7 @@ namespace CremakerControl
 
         void Open()
         {
-            var s = new SerialPort(Port, 115200) { DtrEnable = true, RtsEnable = true, ReadTimeout = 500, WriteTimeout = 2000, NewLine = "\n" };
+            var s = new SerialPort(Port, 115200) { DtrEnable = true, RtsEnable = true, ReadTimeout = 500, WriteTimeout = 2000, NewLine = "\n", Encoding = System.Text.Encoding.UTF8 };   // 펌웨어 한글 메시지(원점 이동 실패 등)
             s.Open();
             lock (writeLock) sp = s;
             Thread.Sleep(300);
