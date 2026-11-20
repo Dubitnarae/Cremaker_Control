@@ -246,14 +246,23 @@ namespace CremakerControl
             nuFlow = Num(f, 74, 86, 60, 50, 200, 100, 0);
             needConn.Add(Btn(f, "적용", 140, 84, 60, 26, () => Cmd("M221 S" + nuFlow.Value.ToString(Inv) + "\nM221")));
 
-            lbLock = Lbl(p, "", 10, 578, 318, 36);
+            // 챔버 조명(메인보드 v1.2 M355) · 설정 백업
+            var c = new GroupBox { Text = "챔버 조명 · 설정 백업", Location = new Point(6, 578), Size = new Size(322, 92) };
+            p.Controls.Add(c);
+            Lbl(c, "조명", 12, 26, 40, 20);
+            needConn.Add(Btn(c, "켜기", 74, 20, 60, 26, () => Cmd("M355 S1 P255")));   // 화면 v1.4 와 같은 명령
+            needConn.Add(Btn(c, "끄기", 140, 20, 60, 26, () => Cmd("M355 S0")));
+            needConn.Add(Btn(c, "설정 백업 · 비교 (M503)", 12, 54, 188, 28, BackupSettings));
+            Btn(c, "백업 폴더", 206, 54, 104, 28, () => { System.IO.Directory.CreateDirectory(BackupDir); Process.Start("explorer.exe", "\"" + BackupDir + "\""); });
+
+            lbLock = Lbl(p, "", 10, 676, 318, 36);
             lbLock.ForeColor = Color.DarkOrange;
 
-            btnEstop = new Button { Text = "비상 정지 (M112)", Location = new Point(6, 616), Size = new Size(322, 56), BackColor = Color.FromArgb(220, 40, 40), ForeColor = Color.White, Font = new Font("맑은 고딕", 13f, FontStyle.Bold), FlatStyle = FlatStyle.Flat };
+            btnEstop = new Button { Text = "비상 정지 (M112)", Location = new Point(6, 714), Size = new Size(322, 56), BackColor = Color.FromArgb(220, 40, 40), ForeColor = Color.White, Font = new Font("맑은 고딕", 13f, FontStyle.Bold), FlatStyle = FlatStyle.Flat };
             btnEstop.Click += (s, e) => Estop();
             p.Controls.Add(btnEstop);
             needConn.Add(btnEstop);
-            Lbl(p, "비상 정지 후에는 프린터 전원을 껐다 켜거나 리셋해야 합니다.", 10, 676, 318, 34).ForeColor = Color.DimGray;
+            Lbl(p, "비상 정지 후에는 프린터 전원을 껐다 켜거나 리셋해야 합니다.", 10, 774, 318, 34).ForeColor = Color.DimGray;
         }
 
         // ---------- 연결 ----------
@@ -277,6 +286,7 @@ namespace CremakerControl
             try { log = new LogWriter(App.LogRoot, DateTime.Now); }
             catch (Exception e) { MessageBox.Show(this, "로그 폴더를 만들 수 없습니다:\n" + e.Message, App.Name); return; }
             det = new Detector();
+            backupArmed = backupOn = false;
             link = new Link(port);
             link.OnLine = (dir, line) => rx.Enqueue(Tuple.Create(DateTime.Now, dir, line));
             link.OnInfo = msg => infos.Enqueue(msg);
@@ -344,6 +354,58 @@ namespace CremakerControl
             AddEvent(new Ev(DateTime.Now, "PC", "비상 정지 (M112) 보냄"));
         }
 
+        // ---------- 설정 백업 ----------
+        // M503 을 보내고, 보낸 줄(">") 다음부터 첫 "ok" 까지 받은 줄을 모은다.
+        // Link 가 ok 를 받아야 다음 명령을 보내므로 그 ok 는 M503 의 것이다.
+        static string BackupDir { get { return System.IO.Path.Combine(App.ExeDir, "설정백업"); } }
+        bool backupArmed, backupOn;
+        readonly List<string> backupLines = new List<string>();
+
+        void BackupSettings()
+        {
+            if (link == null || backupArmed || backupOn) return;
+            backupArmed = true;
+            Cmd("M503");
+        }
+
+        void BackupLine(string dir, string line)
+        {
+            if (dir == ">") { if (backupArmed && line == "M503") { backupArmed = false; backupOn = true; backupLines.Clear(); } return; }
+            if (!backupOn) return;
+            if (line.StartsWith("ok")) { backupOn = false; SaveBackup(); return; }
+            if (!Parser.IsReport(line)) backupLines.Add(line);
+        }
+
+        void SaveBackup()
+        {
+            var now = SettingsBackup.Settings(new[] { "===== M503" }.Concat(backupLines));
+            if (now.Count == 0) { AddEvent(new Ev(DateTime.Now, "오류", "설정 백업 실패 — M503 응답에 설정 줄이 없습니다")); return; }
+            try
+            {
+                System.IO.Directory.CreateDirectory(BackupDir);
+                var prevFile = System.IO.Directory.GetFiles(BackupDir, "설정백업_*.txt").OrderBy(f => f).LastOrDefault();
+                string file = System.IO.Path.Combine(BackupDir, "설정백업_" + DateTime.Now.ToString("yyyyMMdd_HHmmss", Inv) + ".txt");
+                var text = new StringBuilder();
+                if (fwName != "") text.Append("===== M115\r\n").Append(fwName).Append("\r\n");
+                text.Append("===== M503\r\n");
+                foreach (var l in backupLines) text.Append(l).Append("\r\n");
+                System.IO.File.WriteAllText(file, text.ToString(), new UTF8Encoding(true));
+
+                string msg = "설정 " + now.Count + "줄을 저장했습니다:\n" + file;
+                if (prevFile == null) msg += "\n\n처음 백업이라 비교할 파일이 없습니다.";
+                else
+                {
+                    var diff = SettingsBackup.Diff(SettingsBackup.Settings(System.IO.File.ReadAllLines(prevFile)), now);
+                    string pn = System.IO.Path.GetFileName(prevFile);
+                    msg += diff.Count == 0 ? "\n\n지난 백업(" + pn + ")과 같습니다." : "\n\n지난 백업(" + pn + ")과 다른 줄 (- 예전 / + 지금):\n" + string.Join("\n", diff.Take(30)) + (diff.Count > 30 ? "\n… 외 " + (diff.Count - 30) + "줄" : "");
+                    AddEvent(new Ev(DateTime.Now, "상태", diff.Count == 0 ? "설정 백업 — 지난 백업과 같음" : "설정 백업 — 지난 백업과 " + diff.Count + "줄 다름: " + string.Join(" · ", diff.Take(6))));
+                }
+                AddEvent(new Ev(DateTime.Now, "상태", "설정 백업 저장 " + System.IO.Path.GetFileName(file)));
+                MessageBox.Show(this, msg, "설정 백업");
+            }
+            catch (Exception e) { AddEvent(new Ev(DateTime.Now, "오류", "설정 백업 저장 실패: " + e.Message)); }
+        }
+
         void SendConsole()
         {
             string c = tbCmd.Text.Trim();
@@ -370,6 +432,7 @@ namespace CremakerControl
                 DateTime t = item.Item1;
                 string dir = item.Item2, line = item.Item3;
                 if (log != null) log.Serial(t, dir, line);
+                BackupLine(dir, line);
                 if (dir == "<")
                 {
                     int what = Parser.Apply(line, st);

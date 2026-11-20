@@ -2,3 +2,5 @@ dist/
 selftest_out.txt
 원본 펌웨어/
 설정백업_*.txt
+점검스크립트/
+펌웨어_재구성/

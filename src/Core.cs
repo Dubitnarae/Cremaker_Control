@@ -98,8 +98,8 @@ namespace CremakerControl
 
         // M115 → 메인보드 펌웨어 판정. 원본 펌웨어 폴더의 bin 문자열로 확인한 빌드 날짜:
         // v1.1 = "Mar  7 2022" (MACHINE_TYPE:Cremaker), v1.2 = "Jul 12 2022" (MACHINE_TYPE:Cremaker_V1.2).
-        // v1.1 → v1.2 차이는 기종 이름·조명 상태 문구·레벨링 문구뿐이라 이 프로그램 동작은 같다.
-        // 화면(TFT) v1.3 → v1.4 도 버전 표시만 바뀌었고, 화면은 USB 와 따로 통신하므로 영향 없음.
+        // v1.2 는 챔버용: 조명 M355(HE1 단자)·필터 팬 자동(FAN1, 베드 35/노즐 50 °C)·M101 A/B·로드 검사 변경
+        // (2026-11-20 v1.1 소스로 다시 만들어 bin 과 대조). 온도·위치·SD 자동 보고는 같아서 감지 동작은 그대로.
         public const string LatestBoard = "v1.2";
         static readonly Regex RxFw = new Regex(@"FIRMWARE_NAME:Marlin (\S+) \((\w{3} +\d+ \d{4})[^)]*\).*MACHINE_TYPE:(\S+)");
 
@@ -149,6 +149,36 @@ namespace CremakerControl
                 case "M23": case "M24": case "M25": case "M524": return "sd";
             }
             return "";
+        }
+    }
+
+    // M503 설정 백업 비교. 파일 형식: "===== M503" 아래에 받은 줄 그대로 (2026-11-19 손으로 만든 백업과 같은 형식)
+    static class SettingsBackup
+    {
+        // 설정 줄만 ("echo:  M914 X70 Y70" → "M914 X70 Y70"). 설명 줄(echo:; ...)·다른 구역(M115 등)은 뺀다
+        public static List<string> Settings(IEnumerable<string> lines)
+        {
+            var all = new List<string>(lines);
+            int start = all.FindIndex(l => l.Trim().StartsWith("===== M503"));
+            var res = new List<string>();
+            for (int i = start + 1; i < all.Count; i++)
+            {
+                string l = all[i].Trim();
+                if (start >= 0 && l.StartsWith("=====")) break;
+                if (l.StartsWith("echo:")) l = l.Substring(5);
+                l = Regex.Replace(Link.StripComment(l), @"\s+", " ");   // "G21    ; Units in mm" → "G21"
+                if (l.Length > 1 && (l[0] == 'M' || l[0] == 'G') && char.IsDigit(l[1])) res.Add(l);
+            }
+            return res;
+        }
+
+        // 바뀐 줄: "- 예전" / "+ 지금"
+        public static List<string> Diff(List<string> old, List<string> now)
+        {
+            var res = new List<string>();
+            foreach (var l in old) if (!now.Contains(l)) res.Add("- " + l);
+            foreach (var l in now) if (!old.Contains(l)) res.Add("+ " + l);
+            return res;
         }
     }
 

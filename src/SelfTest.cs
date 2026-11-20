@@ -43,6 +43,14 @@ namespace CremakerControl
             Check("오류 줄 (한글 kill 메시지)", Parser.IsError("echo:원점 이동 실패, 재부팅 필요") && Parser.IsError("Error:Printer halted. kill() called!") && !Parser.IsError("echo:busy: processing") && !Parser.IsError("echo:E0 Flow: 100%"));
             Check("주석 지우기", Link.StripComment("G28 ; 홈") == "G28" && Link.StripComment("; 전부 주석") == "");
 
+            // 설정 백업 비교 (줄은 2026-11-19 손으로 만든 백업 파일 모양 그대로)
+            var bak = new[] { "===== M115", "FIRMWARE_NAME:Marlin 2.0.8.1", "Cap:EEPROM:1", "===== M503", "echo:  G21    ; Units in mm (mm)",
+                "echo:; Steps per unit:", "echo: M92 X80.0000 Y80.0000 Z800.0000 E95.0000", "", "echo:  M914 X2 Y2", "ok", "===== M420 V", "echo:  M420 S1" };
+            var set1 = SettingsBackup.Settings(bak);
+            Check("백업 설정 줄만 읽기", set1.SequenceEqual(new[] { "G21", "M92 X80.0000 Y80.0000 Z800.0000 E95.0000", "M914 X2 Y2" }));
+            var set2 = SettingsBackup.Settings(new[] { "===== M503", "echo:  G21 ; Units", "echo: M92 X80.0000 Y80.0000 Z800.0000 E95.0000", "echo:  M914 X2 Y70" });
+            Check("백업 비교", SettingsBackup.Diff(set1, set2).SequenceEqual(new[] { "- M914 X2 Y2", "+ M914 X2 Y70" }) && SettingsBackup.Diff(set1, set1).Count == 0);
+
             // 메인보드 펌웨어 판정 (M115 줄: v1.1·v1.2 는 bin 안 문자열, 06-09 는 이 PC 프린터에서 받은 것)
             bool latest;
             string detail;
