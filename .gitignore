@@ -4,3 +4,5 @@ selftest_out.txt
 설정백업_*.txt
 점검스크립트/
 펌웨어_재구성/
+*.lnk
+*.url
