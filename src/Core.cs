@@ -152,6 +152,132 @@ namespace CremakerControl
         }
     }
 
+    // 화면(TFT)이 자기 SD·USB 로 출력하면 메인보드는 파일을 모른다(진행률이 USB 로 안 옴).
+    // 같은 G코드 파일을 PC 에서 열면 Cura 주석(;TIME: ;LAYER: ;TIME_ELAPSED:)과 층마다의 Z 로 진행률을 추정한다.
+    class GcodeInfo
+    {
+        public string Name = "";
+        public double TotalTime;                                // 초 (;TIME:)
+        public readonly List<double> LayerZ = new List<double>();     // 층에서 처음 압출할 때의 Z
+        public readonly List<double> LayerStart = new List<double>(); // 층 시작까지 예상 시간(초)
+        public int Layers { get { return LayerZ.Count; } }
+
+        static readonly Regex RxWord = new Regex(@"([XYZE])(-?[\d.]+)");
+
+        public static GcodeInfo Parse(IEnumerable<string> lines, string name)
+        {
+            var g = new GcodeInfo { Name = name };
+            double z = 0, e = 0, lastElapsed = 0;
+            bool relE = false, inLayer = false, layerHasZ = false;
+            foreach (var raw in lines)
+            {
+                string l = raw.Trim();
+                if (l.StartsWith(";"))
+                {
+                    if (l.StartsWith(";TIME:")) double.TryParse(l.Substring(6), NumberStyles.Float, Parser.Inv, out g.TotalTime);
+                    else if (l.StartsWith(";LAYER:")) { inLayer = true; layerHasZ = false; g.LayerStart.Add(lastElapsed); g.LayerZ.Add(double.NaN); }
+                    else if (l.StartsWith(";TIME_ELAPSED:")) double.TryParse(l.Substring(14), NumberStyles.Float, Parser.Inv, out lastElapsed);
+                    continue;
+                }
+                string c = Link.StripComment(l);
+                if (c == "M83") relE = true; else if (c == "M82") relE = false;
+                if (!(c.StartsWith("G0 ") || c.StartsWith("G1 ") || c.StartsWith("G92"))) continue;
+                bool hasXY = false, hasE = false;
+                double ne = e;
+                foreach (Match m in RxWord.Matches(c))
+                {
+                    double v = double.Parse(m.Groups[2].Value, Parser.Inv);
+                    switch (m.Groups[1].Value)
+                    {
+                        case "Z": if (!c.StartsWith("G92")) z = v; break;
+                        case "X": case "Y": hasXY = true; break;
+                        case "E": hasE = true; ne = c.StartsWith("G92") ? v : relE ? e + v : v; break;
+                    }
+                }
+                bool extrude = c.StartsWith("G1") && hasXY && hasE && ne > e;
+                if (hasE) e = ne;
+                if (extrude && inLayer && !layerHasZ) { g.LayerZ[g.Layers - 1] = z; layerHasZ = true; }
+            }
+            // 압출이 없는 층(빈 층)은 앞 층 Z 를 쓴다
+            for (int i = 0; i < g.Layers; i++) if (double.IsNaN(g.LayerZ[i])) g.LayerZ[i] = i > 0 ? g.LayerZ[i - 1] : 0;
+            if (g.TotalTime <= 0) g.TotalTime = lastElapsed;
+            return g;
+        }
+
+        // 지금 출력 중인 층 (0부터). Z 보다 높지 않은 마지막 층
+        public int LayerAt(double z)
+        {
+            int idx = -1;
+            for (int i = 0; i < Layers; i++) if (LayerZ[i] <= z + 0.005) idx = i; else break;
+            return idx;
+        }
+    }
+
+    // 화면 출력 진행 추적: 출력 중으로 보이는 동안 경과 시간·출력 Z·층 바뀐 횟수·압출 길이를 센다.
+    class PrintTracker
+    {
+        public bool On;
+        public DateTime Start;
+        public double PrintZ = double.NaN, Extruded;
+        public int ZSteps;            // 출력 Z 가 올라간 횟수 (파일 없을 때 층 수 대신)
+        DateTime lastPrinting;
+        PrinterState prev;
+
+        // 끝난 것으로 보는 시간: 일시정지·긴 이동에 끊기지 않게 넉넉히
+        public double EndAfter = 60;
+
+        public List<Ev> Update(PrinterState s, bool printing, DateTime now)
+        {
+            var evs = new List<Ev>();
+            if (printing) lastPrinting = now;
+            if (printing && !On)
+            {
+                On = true; Start = now; Extruded = 0; ZSteps = 0; PrintZ = double.NaN;
+                evs.Add(new Ev(now, "상태", "출력 시작으로 보임 (화면 또는 SD)"));
+            }
+            else if (On && !printing && (now - lastPrinting).TotalSeconds >= EndAfter)
+            {
+                On = false;
+                evs.Add(new Ev(now, "상태", "출력 끝으로 보임 — " + Elapsed(lastPrinting) + " 걸림, 압출 " + (Extruded / 1000).ToString("0.00", Parser.Inv) + " m"));
+            }
+            if (On && s.HasPos && prev != null && prev.HasPos)
+            {
+                double de = s.E - prev.E;
+                if (de > 0 && de < 1000) Extruded += de;   // G92 E0 로 E 가 0 이 되면 빠진다
+                // XY 를 움직이며 압출 중일 때의 Z 만 출력 높이로 본다 (Z 홉·이동은 빼기)
+                if (de > 0 && (s.X != prev.X || s.Y != prev.Y))
+                {
+                    if (double.IsNaN(PrintZ) || s.Z > PrintZ + 0.001) { if (!double.IsNaN(PrintZ)) ZSteps++; PrintZ = s.Z; }
+                    else if (s.Z < PrintZ - 0.001) PrintZ = s.Z;   // 다음 출력 등으로 내려간 경우
+                }
+            }
+            if (s.HasPos) prev = s.Clone();
+            return evs;
+        }
+
+        public string Elapsed(DateTime now) { return Hm((now - Start).TotalSeconds); }
+
+        public static string Hm(double sec)
+        {
+            if (sec < 0) sec = 0;
+            var t = TimeSpan.FromSeconds(sec);
+            return ((int)t.TotalHours).ToString(Parser.Inv) + ":" + t.Minutes.ToString("00", Parser.Inv);
+        }
+
+        // 파일과 맞춘 진행: (진행 %, 층 번호 1부터, 남은 시간 초 — 실제 속도로 고침). 맞출 수 없으면 null
+        public double[] Progress(GcodeInfo g, DateTime now)
+        {
+            if (!On || g == null || g.Layers == 0 || double.IsNaN(PrintZ) || g.TotalTime <= 0) return null;
+            int i = g.LayerAt(PrintZ);
+            if (i < 0) return null;
+            double done = g.LayerStart[i];
+            double pct = Math.Min(100, 100 * done / g.TotalTime);
+            double actual = (now - Start).TotalSeconds;
+            double factor = done > 300 ? Math.Max(0.5, Math.Min(3, actual / done)) : 1;   // 예상과 실제 속도 비
+            return new[] { pct, i + 1, (g.TotalTime - done) * factor };
+        }
+    }
+
     // M503 설정 백업 비교. 파일 형식: "===== M503" 아래에 받은 줄 그대로 (2026-11-19 손으로 만든 백업과 같은 형식)
     static class SettingsBackup
     {

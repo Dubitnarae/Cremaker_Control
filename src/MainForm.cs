@@ -24,6 +24,8 @@ namespace CremakerControl
         LogWriter log;
         readonly PrinterState st = new PrinterState();
         Detector det = new Detector();
+        readonly PrintTracker job = new PrintTracker();
+        GcodeInfo gfile;   // PC 에서 연 출력 파일 (진행률 추정용)
         readonly ConcurrentQueue<Tuple<DateTime, string, string>> rx = new ConcurrentQueue<Tuple<DateTime, string, string>>();
         readonly ConcurrentQueue<string> infos = new ConcurrentQueue<string>();
         readonly Timer tick = new Timer { Interval = 200 };
@@ -37,7 +39,7 @@ namespace CremakerControl
 
         ComboBox cbPort;
         Button btnConnect, btnEstop;
-        Label lbConn, lbNozzle, lbBed, lbPos, lbMode, lbSd, lbSpeed, lbFw, lbLock;
+        Label lbConn, lbNozzle, lbBed, lbPos, lbMode, lbSd, lbJob, lbFile, lbSpeed, lbFw, lbLock;
         Chart chart;
         ListView lvEvents;
         TextBox tbConsole, tbCmd;
@@ -121,7 +123,15 @@ namespace CremakerControl
             lbPos.Font = new Font("Consolas", 13f, FontStyle.Bold);
             y += 114;
             lbMode = Status("상태");
-            lbSd = Status("SD 출력");
+            lbSd = Status("출력 진행");
+            y -= 6;
+            lbJob = Lbl(left, "", 10, y, 230, 34);
+            y += 36;
+            Btn(left, "출력 파일 맞추기 (진행률)", 10, y, 230, 26, OpenGcode);
+            lbFile = Lbl(left, "같은 G코드를 열면 진행률·남은 시간 계산", 10, y + 28, 230, 34);
+            lbFile.ForeColor = lbJob.ForeColor = Color.DimGray;
+            lbFile.AutoEllipsis = true;
+            y += 66;
             lbSpeed = Status("속도 / 유량");
             lbFw = Lbl(left, "", 10, y, 230, 84);
             lbFw.ForeColor = Color.DimGray;
@@ -447,6 +457,7 @@ namespace CremakerControl
                     sb.Append(t.ToString("HH:mm:ss.fff", Inv)).Append(' ').Append(dir).Append(' ').Append(line).Append("\r\n");
             }
             foreach (var e in det.Update(st, Parser.None, Ts(now), now)) AddEvent(e);   // 이동 멈춤 판정
+            foreach (var e in job.Update(st, link != null && link.Connected && det.LooksPrinting(st, Ts(now)), now)) AddEvent(e);
             if (sb.Length > 0) AppendConsole(sb.ToString());
 
             bool conn = link != null && link.Connected;
@@ -509,12 +520,49 @@ namespace CremakerControl
                 SetText(lbPos, string.Format(Inv, "X {0,8:0.00}\nY {1,8:0.00}\nZ {2,8:0.00}\nE {3,8:0.00}", st.X, st.Y, st.Z, st.E));
             bool printing = det.LooksPrinting(st, Ts(now));
             SetText(lbMode, link == null || !link.Connected ? "-" : printing ? "출력 중" : det.Busy ? "처리 중" : det.Moving ? "이동 중" : st.Tt > 0 || st.Bt > 0 ? "가열 · 대기" : "대기");
-            SetText(lbSd, st.SdPrinting ? st.SdPercent.ToString("0.0", Inv) + " %" : "출력 안 함");
+            ShowJob(now);
             SetText(lbSpeed, (st.Feed >= 0 ? st.Feed + " %" : "-") + " / " + (st.Flow >= 0 ? st.Flow + " %" : "-"));
             bool conn = link != null && link.Connected;
             bool unlock = conn && !printing;
             foreach (var c in motionControls) if (c.Enabled != unlock) c.Enabled = unlock;
             SetText(lbLock, conn && printing ? "출력 중으로 보여 이동·홈·압출 버튼을 잠갔습니다.\n(온도·팬·속도·비상 정지는 됩니다)" : "");
+        }
+
+        void ShowJob(DateTime now)
+        {
+            if (st.SdPrinting) { SetText(lbSd, "SD " + st.SdPercent.ToString("0.0", Inv) + " %"); SetText(lbJob, "메인보드 SD 카드 출력"); return; }
+            if (!job.On) { SetText(lbSd, "출력 안 함"); SetText(lbJob, ""); return; }
+            string z = double.IsNaN(job.PrintZ) ? "-" : job.PrintZ.ToString("0.00", Inv);
+            var p = job.Progress(gfile, now);
+            if (p != null)
+            {
+                SetText(lbSd, p[0].ToString("0", Inv) + " % · " + p[1] + "/" + gfile.Layers + "층");
+                SetText(lbJob, "남은 약 " + PrintTracker.Hm(p[2]) + " · 경과 " + job.Elapsed(now) + " · Z " + z);
+            }
+            else
+            {
+                SetText(lbSd, "출력 중 " + job.Elapsed(now));
+                SetText(lbJob, "Z " + z + " · 층 바뀜 " + job.ZSteps + "번 · 압출 " + (job.Extruded / 1000).ToString("0.00", Inv) + " m");
+            }
+        }
+
+        void OpenGcode()
+        {
+            using (var d = new OpenFileDialog { Title = "화면에서 출력 중인 것과 같은 G코드 파일", Filter = "G코드 (*.gcode;*.gco;*.g)|*.gcode;*.gco;*.g|모든 파일 (*.*)|*.*" })
+            {
+                if (d.ShowDialog(this) != DialogResult.OK) return;
+                GcodeInfo g;
+                try { g = GcodeInfo.Parse(System.IO.File.ReadLines(d.FileName), System.IO.Path.GetFileName(d.FileName)); }
+                catch (Exception e) { MessageBox.Show(this, "파일을 읽을 수 없습니다:\n" + e.Message, App.Name); return; }
+                if (g.Layers == 0 || g.TotalTime <= 0)
+                {
+                    MessageBox.Show(this, "층 정보(;LAYER:)나 예상 시간(;TIME:)이 없는 파일입니다.\nCura 로 만든 G코드여야 진행률을 계산할 수 있습니다.", App.Name);
+                    return;
+                }
+                gfile = g;
+                lbFile.Text = g.Name + "\n" + g.Layers + "층 · 예상 " + PrintTracker.Hm(g.TotalTime) + " (Z " + g.LayerZ[g.Layers - 1].ToString("0.##", Inv) + " mm)";
+                AddEvent(new Ev(DateTime.Now, "상태", "출력 파일 맞춤: " + g.Name + " — " + g.Layers + "층, 예상 " + PrintTracker.Hm(g.TotalTime)));
+            }
         }
 
         static void SetText(Label l, string s) { if (l.Text != s) l.Text = s; }   // 값이 바뀔 때만 다시 그린다

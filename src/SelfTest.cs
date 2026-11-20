@@ -51,6 +51,29 @@ namespace CremakerControl
             var set2 = SettingsBackup.Settings(new[] { "===== M503", "echo:  G21 ; Units", "echo: M92 X80.0000 Y80.0000 Z800.0000 E95.0000", "echo:  M914 X2 Y70" });
             Check("백업 비교", SettingsBackup.Diff(set1, set2).SequenceEqual(new[] { "- M914 X2 Y2", "+ M914 X2 Y70" }) && SettingsBackup.Diff(set1, set1).Count == 0);
 
+            // Cura G코드 진행률 (Cura 표준 주석 모양: ;TIME: ;LAYER: ;TIME_ELAPSED:, Z 홉 이동 포함)
+            var gc = GcodeInfo.Parse(new[] {
+                ";FLAVOR:Marlin", ";TIME:1000", ";LAYER_COUNT:3", "M82", "G92 E0", "G1 Z15 F3000",
+                ";LAYER:0", "G0 X10 Y10 Z0.3", "G1 X20 Y10 E1.5", "G1 E0.5 ; 되감기", "G0 Z1.3", "G0 X30 Y30", "G0 Z0.3", "G1 X40 Y30 E2", ";TIME_ELAPSED:200",
+                ";LAYER:1", "G0 X10 Y10 Z0.5", "G1 X20 Y10 E3", "G92 E0", "G1 X30 Y10 E1", ";TIME_ELAPSED:600",
+                ";LAYER:2", "G0 X10 Y10 Z0.7", "M83", "G1 X20 Y10 E0.4", ";TIME_ELAPSED:1000" }, "t.gcode");
+            Check("G코드 층·Z·시간", gc.Layers == 3 && gc.LayerZ.SequenceEqual(new[] { 0.3, 0.5, 0.7 }) && gc.LayerStart.SequenceEqual(new[] { 0.0, 200, 600 }) && gc.TotalTime == 1000);
+            Check("Z 로 층 찾기", gc.LayerAt(0.3) == 0 && gc.LayerAt(0.5) == 1 && gc.LayerAt(0.2) == -1 && gc.LayerAt(9) == 2);
+            var tr = new PrintTracker();
+            var ps = new PrinterState { T = 200, Tt = 200, X = 10, Y = 10, Z = 0.5, E = 0 };
+            var t0 = new DateTime(2026, 11, 20, 10, 0, 0);
+            Check("출력 시작 감지", tr.Update(ps, true, t0).Count == 1 && tr.On);
+            ps = ps.Clone(); ps.X = 20; ps.E = 2;
+            tr.Update(ps, true, t0.AddSeconds(400));
+            var pr = tr.Progress(gc, t0.AddSeconds(400));
+            Check("진행률 (2층 시작 = 200/1000)", pr != null && pr[0] == 20 && pr[1] == 2 && tr.PrintZ == 0.5 && tr.Extruded == 2);
+            ps = ps.Clone(); ps.Z = 1.5; ps.X = 25;   // Z 홉 이동 (압출 없음) 은 출력 높이로 안 봄
+            tr.Update(ps, true, t0.AddSeconds(401));
+            Check("Z 홉 무시", tr.PrintZ == 0.5);
+            tr.Update(ps, false, t0.AddSeconds(430));
+            Check("잠깐 멈춤은 끝 아님", tr.On);
+            Check("60초 멈추면 출력 끝", tr.Update(ps, false, t0.AddSeconds(470)).Count == 1 && !tr.On);
+
             // 메인보드 펌웨어 판정 (M115 줄: v1.1·v1.2 는 bin 안 문자열, 06-09 는 이 PC 프린터에서 받은 것)
             bool latest;
             string detail;
