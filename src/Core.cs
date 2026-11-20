@@ -33,6 +33,11 @@ namespace CremakerControl
         public bool SdPrinting;
         public long SdPos, SdSize;
         public int Feed = -1, Flow = -1;
+        // 화면 펌웨어 v1.5+ 가 자기 SD 출력 중 보내는 "TFT_PROGRESS P.. T.. C.. S.. H.." (메인보드 M118 P2 로 USB 에 옴)
+        public bool TftOn, TftPaused;
+        public int TftPct;
+        public long TftSec, TftPos, TftSize;
+        public double TftPercent { get { return TftSize > 0 ? 100.0 * TftPos / TftSize : TftPct; } }
 
         public bool HasTemp { get { return !double.IsNaN(T); } }
         public bool HasPos { get { return !double.IsNaN(X); } }
@@ -53,10 +58,11 @@ namespace CremakerControl
         static readonly Regex RxSd = new Regex(@"SD printing byte (\d+)/(\d+)");
         static readonly Regex RxFeed = new Regex(@"FR:(\d+)%");
         static readonly Regex RxFlow = new Regex(@"E\d+ Flow: ?(\d+)%");
+        static readonly Regex RxTft = new Regex(@"^TFT_PROGRESS P(\d+) T(\d+) C(\d+) S(\d+) H([01])");
 
         static double D(string s) { return double.Parse(s, Inv); }
 
-        public const int None = 0, Temp = 1, Pos = 2, Sd = 4, Speed = 8, Busy = 16;
+        public const int None = 0, Temp = 1, Pos = 2, Sd = 4, Speed = 8, Busy = 16, Tft = 32;
 
         public static int Apply(string line, PrinterState s)
         {
@@ -91,6 +97,13 @@ namespace CremakerControl
                 s.SdPrinting = false;
                 return Sd;
             }
+            if ((m = RxTft.Match(line)).Success)
+            {
+                s.TftOn = true; s.TftPct = int.Parse(m.Groups[1].Value, Inv); s.TftSec = long.Parse(m.Groups[2].Value, Inv);
+                s.TftPos = long.Parse(m.Groups[3].Value, Inv); s.TftSize = long.Parse(m.Groups[4].Value, Inv); s.TftPaused = m.Groups[5].Value == "1";
+                return Tft;
+            }
+            if (line == "TFT_PROGRESS END") { s.TftOn = s.TftPaused = false; return Tft; }
             if ((m = RxFeed.Match(line)).Success) { s.Feed = int.Parse(m.Groups[1].Value, Inv); return Speed; }
             if ((m = RxFlow.Match(line)).Success) { s.Flow = int.Parse(m.Groups[1].Value, Inv); return Speed; }
             return None;
@@ -130,7 +143,7 @@ namespace CremakerControl
         public static bool IsReport(string line)
         {
             return line.StartsWith("T:") || line.StartsWith(" T:") || line.StartsWith("X:") || line.Contains("SD printing") || line == "ok"
-                || line.StartsWith("FR:") || line.Contains(" Flow: ") || line.StartsWith("echo:busy");
+                || line.StartsWith("FR:") || line.Contains(" Flow: ") || line.StartsWith("echo:busy") || line.StartsWith("TFT_PROGRESS P");
         }
 
         // PC에서 보낸 명령이 무엇을 바꾸는지 (출처 판단용)
@@ -152,11 +165,12 @@ namespace CremakerControl
         }
     }
 
-    // 화면(TFT)이 자기 SD·USB 로 출력하면 메인보드는 파일을 모른다(진행률이 USB 로 안 옴).
+    // 화면(TFT)이 자기 SD·USB 로 출력하면 메인보드는 파일을 모른다(공식 화면 펌웨어는 진행률이 USB 로 안 옴, 직접 만든 v1.5+ 는 TFT_PROGRESS 로 옴).
     // 같은 G코드 파일을 PC 에서 열면 Cura 주석(;TIME: ;LAYER: ;TIME_ELAPSED:)과 층마다의 Z 로 진행률을 추정한다.
     class GcodeInfo
     {
         public string Name = "";
+        public long Size;   // 파일 바이트 수 — 화면 보고의 S 와 같으면 같은 파일
         public double TotalTime;                                // 초 (;TIME:)
         public readonly List<double> LayerZ = new List<double>();     // 층에서 처음 압출할 때의 Z
         public readonly List<double> LayerStart = new List<double>(); // 층 시작까지 예상 시간(초)
@@ -256,6 +270,13 @@ namespace CremakerControl
         }
 
         public string Elapsed(DateTime now) { return Hm((now - Start).TotalSeconds); }
+
+        // 화면 보고(TFT_PROGRESS)로 남은 시간 추정: 지금까지 읽은 바이트 속도가 그대로라고 본다. 1% 전에는 모름(NaN)
+        public static double TftRemain(PrinterState s)
+        {
+            if (s.TftPos <= 0 || s.TftSize <= 0 || s.TftPercent < 1) return double.NaN;
+            return s.TftSec * (double)(s.TftSize - s.TftPos) / s.TftPos;
+        }
 
         public static string Hm(double sec)
         {

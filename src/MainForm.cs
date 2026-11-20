@@ -26,6 +26,8 @@ namespace CremakerControl
         Detector det = new Detector();
         readonly PrintTracker job = new PrintTracker();
         GcodeInfo gfile;   // PC 에서 연 출력 파일 (진행률 추정용)
+        DateTime tftAt;    // 마지막 화면 진행 보고(TFT_PROGRESS) 받은 때 — 90초 넘게 없으면 끊긴 것으로 본다
+        bool tftWasOn, tftWasPaused;
         readonly ConcurrentQueue<Tuple<DateTime, string, string>> rx = new ConcurrentQueue<Tuple<DateTime, string, string>>();
         readonly ConcurrentQueue<string> infos = new ConcurrentQueue<string>();
         readonly Timer tick = new Timer { Interval = 200 };
@@ -447,6 +449,7 @@ namespace CremakerControl
                 {
                     int what = Parser.Apply(line, st);
                     foreach (var e in det.Update(st, what, Ts(t), t)) AddEvent(e);
+                    if (what == Parser.Tft) TftEvents(t);
                     if (line.StartsWith("FIRMWARE_NAME:")) { fwName = line; ShowFw(); }
                     if (Parser.IsError(line))
                         AddEvent(new Ev(t, "오류", line));
@@ -528,9 +531,31 @@ namespace CremakerControl
             SetText(lbLock, conn && printing ? "출력 중으로 보여 이동·홈·압출 버튼을 잠갔습니다.\n(온도·팬·속도·비상 정지는 됩니다)" : "");
         }
 
+        // 화면 진행 보고의 시작·일시정지·끝을 사건 기록에
+        void TftEvents(DateTime t)
+        {
+            tftAt = t;
+            if (st.TftOn && !tftWasOn)
+                AddEvent(new Ev(t, "프린터", "화면 출력 진행 보고 받음 — 파일 " + st.TftSize.ToString("N0", Inv) + " 바이트, " + st.TftPercent.ToString("0.0", Inv) + " %"));
+            else if (!st.TftOn && tftWasOn)
+                AddEvent(new Ev(t, "프린터", "화면 출력 끝 (화면 보고) — 경과 " + PrintTracker.Hm(st.TftSec)));
+            else if (st.TftOn && st.TftPaused != tftWasPaused)
+                AddEvent(new Ev(t, "프린터", st.TftPaused ? "화면 출력 일시정지" : "화면 출력 다시 시작"));
+            tftWasOn = st.TftOn; tftWasPaused = st.TftPaused;
+        }
+
         void ShowJob(DateTime now)
         {
             if (st.SdPrinting) { SetText(lbSd, "SD " + st.SdPercent.ToString("0.0", Inv) + " %"); SetText(lbJob, "메인보드 SD 카드 출력"); return; }
+            if (st.TftOn && (now - tftAt).TotalSeconds < 90)   // 화면 펌웨어 v1.5+ 의 정확한 진행률
+            {
+                var lp = job.On ? job.Progress(gfile, now) : null;
+                SetText(lbSd, "화면 SD " + st.TftPercent.ToString("0.0", Inv) + " %" + (lp != null ? " · " + lp[1] + "/" + gfile.Layers + "층" : "") + (st.TftPaused ? " · 일시정지" : ""));
+                double rem = PrintTracker.TftRemain(st);
+                string match = gfile == null ? "" : gfile.Size == st.TftSize ? " · 맞춘 파일과 같음" : " · 맞춘 파일과 크기 다름";
+                SetText(lbJob, "남은 약 " + (double.IsNaN(rem) ? "-" : PrintTracker.Hm(rem)) + " · 경과 " + PrintTracker.Hm(st.TftSec) + match);
+                return;
+            }
             if (!job.On) { SetText(lbSd, "출력 안 함"); SetText(lbJob, ""); return; }
             string z = double.IsNaN(job.PrintZ) ? "-" : job.PrintZ.ToString("0.00", Inv);
             var p = job.Progress(gfile, now);
@@ -559,6 +584,7 @@ namespace CremakerControl
                     MessageBox.Show(this, "층 정보(;LAYER:)나 예상 시간(;TIME:)이 없는 파일입니다.\nCura 로 만든 G코드여야 진행률을 계산할 수 있습니다.", App.Name);
                     return;
                 }
+                g.Size = new System.IO.FileInfo(d.FileName).Length;
                 gfile = g;
                 lbFile.Text = g.Name + "\n" + g.Layers + "층 · 예상 " + PrintTracker.Hm(g.TotalTime) + " (Z " + g.LayerZ[g.Layers - 1].ToString("0.##", Inv) + " mm)";
                 AddEvent(new Ev(DateTime.Now, "상태", "출력 파일 맞춤: " + g.Name + " — " + g.Layers + "층, 예상 " + PrintTracker.Hm(g.TotalTime)));

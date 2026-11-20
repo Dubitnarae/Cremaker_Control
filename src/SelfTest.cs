@@ -33,6 +33,15 @@ namespace CremakerControl
                 && s.X == -8 && s.Y == -6 && s.Z == 0 && s.E == 0);
             Check("SD 진행", Parser.Apply("SD printing byte 500/1000", s) == Parser.Sd && s.SdPrinting && Math.Abs(s.SdPercent - 50) < 1e-9);
             Check("SD 안 함", Parser.Apply("Not SD printing", s) == Parser.Sd && !s.SdPrinting);
+            // 화면 펌웨어 v1.5 의 M118 P2 진행 보고 (Printing.c loopReportProgress 형식)
+            Check("화면 진행 보고", Parser.Apply("TFT_PROGRESS P25 T600 C250000 S1000000 H0", s) == Parser.Tft
+                && s.TftOn && !s.TftPaused && s.TftPct == 25 && s.TftSec == 600 && Math.Abs(s.TftPercent - 25) < 1e-9);
+            Check("화면 진행 남은 시간", Math.Abs(PrintTracker.TftRemain(s) - 1800) < 1e-9);
+            Check("화면 진행 일시정지", Parser.Apply("TFT_PROGRESS P25 T630 C250000 S1000000 H1", s) == Parser.Tft && s.TftPaused);
+            Check("화면 진행 숨김 대상", Parser.IsReport("TFT_PROGRESS P25 T630 C250000 S1000000 H1") && !Parser.IsReport("TFT_PROGRESS END"));
+            Check("화면 진행 끝", Parser.Apply("TFT_PROGRESS END", s) == Parser.Tft && !s.TftOn && !s.TftPaused);
+            var s0 = new PrinterState { TftOn = true, TftPos = 5, TftSize = 1000, TftSec = 10 };
+            Check("화면 진행 1% 전엔 남은 시간 모름", double.IsNaN(PrintTracker.TftRemain(s0)));
             Check("속도 M220", Parser.Apply("FR:120%", s) == Parser.Speed && s.Feed == 120);
             Check("유량 M221", Parser.Apply("echo:E0 Flow: 95%", s) == Parser.Speed && s.Flow == 95);
             Check("상관없는 줄", Parser.Apply("Cap:EEPROM:1", s) == Parser.None && Parser.Apply("ok", s) == Parser.None);
