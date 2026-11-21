@@ -73,6 +73,8 @@ namespace CremakerControl
                 ";TYPE:FILL", "G1 X10 Y10 E1", "G1 E-1", "G0 X0 Y0", ";LAYER:1", ";TYPE:WALL-OUTER", "G0 X0 Y0 Z0.4", "G1 X10 Y0 E1" }, "s.gcode");
             Check("압출 선 합치기·종류", g3.Segs.Count == 4 && g3.Segs[0].X1 == 20 && g3.Segs[0].Kind == 0 && g3.Segs[2].Kind == 3 && g3.Segs[3].Layer == 1
                 && g3.MaxX == 20 && g3.MaxY == 10 && Math.Abs(g3.MaxZ - 0.4) < 1e-6);
+            var g5 = GcodeInfo.Parse(new[] { ";LAYER:0", "M83", "G0 X0 Y0 Z0.2", ";TYPE:SUPPORT", "G1 X10 Y0 E1", ";TYPE:SKIRT", "G1 X10 Y10 E1" }, "s.gcode");
+            Check("서포트 종류", g5.Segs.Count == 2 && g5.Segs[0].Kind == 5 && g5.Segs[1].Kind == 4);
             Check("바이트 위치로 선 수", g3.CountAtOffset(g3.Segs[0].End) == 1 && g3.CountAtOffset(g3.Segs[0].End - 1) == 0 && g3.CountAtOffset(long.MaxValue) == 4);
             Check("노즐 위치로 선 찾기", g3.Locate(0, 4, 20, 5, 0.2, 4) == 2 && g3.Locate(0, 4, 50, 50, 0.2, 4) == -1 && g3.Locate(0, 4, 5, 0, 0.4, 4) == 4
                 && g3.FirstOfLayer(1) == 3);

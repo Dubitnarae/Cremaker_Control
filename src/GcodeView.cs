@@ -28,8 +28,10 @@ namespace CremakerControl
             Color.FromArgb(245, 155, 55),   // 안쪽 벽
             Color.FromArgb(235, 195, 50),   // 윗·아랫면
             Color.FromArgb(205, 150, 95),   // 채움
-            Color.FromArgb(60, 160, 170) }; // 기타
+            Color.FromArgb(60, 160, 170),   // 기타
+            Color.FromArgb(90, 140, 230) }; // 서포트
         static readonly Color PendingColor = Color.FromArgb(205, 205, 205);
+        static readonly Color PendingSupport = Color.FromArgb(200, 215, 240);
 
         public GcodeView()
         {
@@ -98,6 +100,7 @@ namespace CremakerControl
             var pens = new Pen[KindColor.Length];
             for (int k = 0; k < pens.Length; k++) pens[k] = new Pen(KindColor[k]);
             var pending = new Pen(PendingColor);
+            var pendingSup = new Pen(PendingSupport);
             var pts = new List<PointF>();
             Pen cur = null;
             float lx = float.NaN, ly = 0, lz = 0;
@@ -105,10 +108,10 @@ namespace CremakerControl
             {
                 var s = segs[i];
                 bool isDone = i < doneN;
-                if (s.Kind != 0 && (fast || !isDone)) continue;                  // 남은 부분·끄는 중엔 바깥 벽만
+                if (s.Kind != 0 && (fast || !isDone && s.Kind != 5)) continue;   // 남은 부분은 바깥 벽·서포트만, 끄는 중엔 바깥 벽만
                 if (fast && s.Layer % layerStep != 0 && s.Layer != top) continue;
                 if (isDone && s.Kind == 3 && s.Layer < top - 1) continue;        // 위층에 덮여 안 보이는 안쪽 채움은 생략
-                Pen pen = isDone ? pens[s.Kind] : pending;
+                Pen pen = isDone ? pens[s.Kind] : s.Kind == 5 ? pendingSup : pending;
                 if (pen != cur || s.X0 != lx || s.Y0 != ly || s.Z != lz)
                 {
                     if (pts.Count >= 2) gr.DrawLines(cur, pts.ToArray());
@@ -121,7 +124,7 @@ namespace CremakerControl
             }
             if (pts.Count >= 2) gr.DrawLines(cur, pts.ToArray());
             foreach (var p in pens) p.Dispose();
-            pending.Dispose();
+            pending.Dispose(); pendingSup.Dispose();
 
             // 노즐: 위치 보고가 있으면 그 자리, 없으면 마지막으로 출력한 선 끝
             double nx = nozX, ny = nozY, nz = nozZ;

@@ -177,7 +177,7 @@ namespace CremakerControl
         public float X0, Y0, X1, Y1, Z;
         public long End;
         public int Layer;
-        public byte Kind;   // 0 바깥 벽, 1 안쪽 벽, 2 윗·아랫면, 3 채움, 4 기타(스커트·서포트)
+        public byte Kind;   // 0 바깥 벽, 1 안쪽 벽, 2 윗·아랫면, 3 채움, 4 기타(스커트), 5 서포트
     }
 
     class GcodeInfo
@@ -225,6 +225,7 @@ namespace CremakerControl
                 case "WALL-INNER": return 1;
                 case "SKIN": return 2;
                 case "FILL": return 3;
+                case "SUPPORT": case "SUPPORT-INTERFACE": case "SUPPORT-INFILL": return 5;
                 default: return 4;
             }
         }
