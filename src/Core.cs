@@ -8,6 +8,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -170,6 +171,15 @@ namespace CremakerControl
 
     // 화면(TFT)이 자기 SD·USB 로 출력하면 메인보드는 파일을 모른다(공식 화면 펌웨어는 진행률이 USB 로 안 옴, 직접 만든 v1.5+ 는 TFT_PROGRESS 로 옴).
     // 같은 G코드 파일을 PC 에서 열면 Cura 주석(;TIME: ;LAYER: ;TIME_ELAPSED:)과 층마다의 Z 로 진행률을 추정한다.
+    // 3D 보기용 압출 선 하나. End = 이 줄을 다 읽은 뒤의 파일 바이트 위치 (화면 보고 C 와 비교)
+    struct Seg
+    {
+        public float X0, Y0, X1, Y1, Z;
+        public long End;
+        public int Layer;
+        public byte Kind;   // 0 바깥 벽, 1 안쪽 벽, 2 윗·아랫면, 3 채움, 4 기타(스커트·서포트)
+    }
+
     class GcodeInfo
     {
         public string Name = "";
@@ -178,47 +188,156 @@ namespace CremakerControl
         public readonly List<double> LayerZ = new List<double>();     // 층에서 처음 압출할 때의 Z
         public readonly List<double> LayerStart = new List<double>(); // 층 시작까지 예상 시간(초)
         public int Layers { get { return LayerZ.Count; } }
+        public readonly List<Seg> Segs = new List<Seg>();   // 압출 선 (거의 일직선인 짧은 선은 합침)
+        public float MinX = float.MaxValue, MinY = float.MaxValue, MaxX = float.MinValue, MaxY = float.MinValue, MaxZ;
 
         static readonly Regex RxWord = new Regex(@"([XYZE])(-?[\d.]+)");
 
+        // 파일 바이트로 읽어 줄마다 정확한 바이트 위치를 단다 (줄 끝이 \r\n 이든 \n 이든)
+        public static GcodeInfo Load(string path)
+        {
+            var b = File.ReadAllBytes(path);
+            var g = Parse(Lines(b), Path.GetFileName(path));
+            g.Size = b.Length;
+            return g;
+        }
+
+        static IEnumerable<KeyValuePair<long, string>> Lines(byte[] b)
+        {
+            int start = 0;
+            for (int i = 0; i < b.Length; i++)
+                if (b[i] == (byte)'\n') { yield return new KeyValuePair<long, string>(i + 1, Encoding.UTF8.GetString(b, start, i - start)); start = i + 1; }
+            if (start < b.Length) yield return new KeyValuePair<long, string>(b.Length, Encoding.UTF8.GetString(b, start, b.Length - start));
+        }
+
+        // 줄 끝을 \n 하나로 보고 바이트 위치를 센다 (시험용)
         public static GcodeInfo Parse(IEnumerable<string> lines, string name)
         {
-            var g = new GcodeInfo { Name = name };
-            double z = 0, e = 0, lastElapsed = 0;
-            bool relE = false, inLayer = false, layerHasZ = false;
-            foreach (var raw in lines)
+            long off = 0;
+            return Parse(lines.Select(l => new KeyValuePair<long, string>(off += Encoding.UTF8.GetByteCount(l) + 1, l)), name);
+        }
+
+        static byte KindOf(string type)
+        {
+            switch (type)
             {
-                string l = raw.Trim();
+                case "WALL-OUTER": return 0;
+                case "WALL-INNER": return 1;
+                case "SKIN": return 2;
+                case "FILL": return 3;
+                default: return 4;
+            }
+        }
+
+        // 앞 선에 이어지고 거의 일직선이면 합친다 (꺾인 점이 새 직선에서 0.02 mm 안)
+        // shortcut: 꺾인 점 하나만 보므로 아주 완만한 곡선은 합친 뒤 오차가 조금씩 쌓일 수 있음 — 모양이 어긋나 보이면 합친 선 길이에 한계를 둘 것
+        void AddSeg(Seg n)
+        {
+            int k = Segs.Count - 1;
+            if (k >= 0)
+            {
+                var p = Segs[k];
+                if (p.X1 == n.X0 && p.Y1 == n.Y0 && p.Z == n.Z && p.Layer == n.Layer && p.Kind == n.Kind)
+                {
+                    double dx = n.X1 - p.X0, dy = n.Y1 - p.Y0, len = Math.Sqrt(dx * dx + dy * dy);
+                    double dot = (p.X1 - p.X0) * (n.X1 - p.X1) + (p.Y1 - p.Y0) * (n.Y1 - p.Y1);
+                    if (len > 0 && dot > 0 && Math.Abs(dx * (p.Y0 - p.Y1) - dy * (p.X0 - p.X1)) / len < 0.02)
+                    {
+                        p.X1 = n.X1; p.Y1 = n.Y1; p.End = n.End;
+                        Segs[k] = p;
+                        return;
+                    }
+                }
+            }
+            Segs.Add(n);
+        }
+
+        static GcodeInfo Parse(IEnumerable<KeyValuePair<long, string>> lines, string name)
+        {
+            var g = new GcodeInfo { Name = name };
+            double x = 0, y = 0, z = 0, e = 0, lastElapsed = 0;
+            bool relE = false, rel = false, inLayer = false, layerHasZ = false;
+            byte kind = 4;
+            foreach (var kv in lines)
+            {
+                string l = kv.Value.Trim();
                 if (l.StartsWith(";"))
                 {
                     if (l.StartsWith(";TIME:")) double.TryParse(l.Substring(6), NumberStyles.Float, Parser.Inv, out g.TotalTime);
                     else if (l.StartsWith(";LAYER:")) { inLayer = true; layerHasZ = false; g.LayerStart.Add(lastElapsed); g.LayerZ.Add(double.NaN); }
                     else if (l.StartsWith(";TIME_ELAPSED:")) double.TryParse(l.Substring(14), NumberStyles.Float, Parser.Inv, out lastElapsed);
+                    else if (l.StartsWith(";TYPE:")) kind = KindOf(l.Substring(6));
                     continue;
                 }
                 string c = Link.StripComment(l);
                 if (c == "M83") relE = true; else if (c == "M82") relE = false;
+                else if (c == "G91") rel = true; else if (c == "G90") rel = false;
+                // shortcut: G2/G3 원호는 무시 — Cura 기본 설정은 원호를 안 쓴다. 원호 쓰는 슬라이서를 쓰게 되면 추가
                 if (!(c.StartsWith("G0 ") || c.StartsWith("G1 ") || c.StartsWith("G92"))) continue;
-                bool hasXY = false, hasE = false;
-                double ne = e;
+                bool hasXY = false, hasE = false, g92 = c.StartsWith("G92");
+                double ne = e, nx = x, ny = y;
                 foreach (Match m in RxWord.Matches(c))
                 {
                     double v = double.Parse(m.Groups[2].Value, Parser.Inv);
                     switch (m.Groups[1].Value)
                     {
-                        case "Z": if (!c.StartsWith("G92")) z = v; break;
-                        case "X": case "Y": hasXY = true; break;
-                        case "E": hasE = true; ne = c.StartsWith("G92") ? v : relE ? e + v : v; break;
+                        case "Z": if (!g92) z = rel ? z + v : v; break;
+                        case "X": if (!g92) { hasXY = true; nx = rel ? x + v : v; } break;
+                        case "Y": if (!g92) { hasXY = true; ny = rel ? y + v : v; } break;
+                        case "E": hasE = true; ne = g92 ? v : relE || rel ? e + v : v; break;
                     }
                 }
                 bool extrude = c.StartsWith("G1") && hasXY && hasE && ne > e;
                 if (hasE) e = ne;
                 if (extrude && inLayer && !layerHasZ) { g.LayerZ[g.Layers - 1] = z; layerHasZ = true; }
+                if (extrude && inLayer && (nx != x || ny != y))   // 첫 층 전 노즐 닦기 선은 빼서 모델 가운데로 보이게
+                {
+                    g.AddSeg(new Seg { X0 = (float)x, Y0 = (float)y, X1 = (float)nx, Y1 = (float)ny, Z = (float)z, End = kv.Key, Layer = Math.Max(0, g.Layers - 1), Kind = kind });
+                    g.MinX = Math.Min(g.MinX, (float)Math.Min(x, nx)); g.MaxX = Math.Max(g.MaxX, (float)Math.Max(x, nx));
+                    g.MinY = Math.Min(g.MinY, (float)Math.Min(y, ny)); g.MaxY = Math.Max(g.MaxY, (float)Math.Max(y, ny));
+                    g.MaxZ = Math.Max(g.MaxZ, (float)z);
+                }
+                x = nx; y = ny;
             }
             // 압출이 없는 층(빈 층)은 앞 층 Z 를 쓴다
             for (int i = 0; i < g.Layers; i++) if (double.IsNaN(g.LayerZ[i])) g.LayerZ[i] = i > 0 ? g.LayerZ[i - 1] : 0;
             if (g.TotalTime <= 0) g.TotalTime = lastElapsed;
             return g;
+        }
+
+        // 파일 바이트 위치 off 까지 읽은 압출 선 수
+        public int CountAtOffset(long off)
+        {
+            int lo = 0, hi = Segs.Count;
+            while (lo < hi) { int m = (lo + hi) / 2; if (Segs[m].End <= off) lo = m + 1; else hi = m; }
+            return lo;
+        }
+
+        // layer 층의 첫 선 번호
+        public int FirstOfLayer(int layer)
+        {
+            int lo = 0, hi = Segs.Count;
+            while (lo < hi) { int m = (lo + hi) / 2; if (Segs[m].Layer < layer) lo = m + 1; else hi = m; }
+            return lo;
+        }
+
+        // [from, to) 선 중 노즐 위치(x, y)가 올라 있는 선을 찾아 '여기까지 출력함' 선 수(번호+1)를 돌려준다. 못 찾으면 -1.
+        // 위치 보고 Z 는 층 높이 그대로 온다(2026-11-21 실제 출력: 메시 보정은 Count 에만) → Z 가 같은 층만. Z 홉 이동 중이면 못 찾음. 같은 자리를 지나는 선이 여럿이면 near 에 가까운 것.
+        public int Locate(int from, int to, double x, double y, double z, int near)
+        {
+            int best = -1;
+            from = Math.Max(0, from); to = Math.Min(Segs.Count, to);
+            for (int i = from; i < to; i++)
+            {
+                var s = Segs[i];
+                if (Math.Abs(s.Z - z) > 0.05) continue;
+                double dx = s.X1 - s.X0, dy = s.Y1 - s.Y0, l2 = dx * dx + dy * dy;
+                double t = l2 > 0 ? Math.Max(0, Math.Min(1, ((x - s.X0) * dx + (y - s.Y0) * dy) / l2)) : 0;
+                double ex = s.X0 + t * dx - x, ey = s.Y0 + t * dy - y;
+                if (ex * ex + ey * ey > 0.3 * 0.3) continue;
+                if (best < 0 || Math.Abs(i - near) < Math.Abs(best - near)) best = i;
+            }
+            return best < 0 ? -1 : best + 1;
         }
 
         // 지금 출력 중인 층 (0부터). Z 보다 높지 않은 마지막 층

@@ -43,6 +43,10 @@ namespace CremakerControl
         Button btnConnect, btnEstop;
         Label lbConn, lbNozzle, lbBed, lbPos, lbMode, lbSd, lbJob, lbFile, lbSpeed, lbFw, lbLock;
         Chart chart;
+        GcodeView view3d;
+        TabControl topTabs;
+        TabPage tp3d;
+        DateTime last3d;
         ListView lvEvents;
         TextBox tbConsole, tbCmd;
         CheckBox cbHideReports;
@@ -157,7 +161,16 @@ namespace CremakerControl
             AddSeries("노즐 목표", Color.FromArgb(255, 170, 150), 1);
             AddSeries("베드", Color.RoyalBlue, 2);
             AddSeries("베드 목표", Color.FromArgb(150, 170, 240), 1);
-            split.Panel1.Controls.Add(chart);
+            topTabs = new TabControl { Dock = DockStyle.Fill };
+            var tpChart = new TabPage("온도 그래프");
+            tpChart.Controls.Add(chart);
+            tp3d = new TabPage("3D 진행 보기");
+            view3d = new GcodeView { Dock = DockStyle.Fill };
+            tp3d.Controls.Add(view3d);
+            topTabs.TabPages.Add(tpChart);
+            topTabs.TabPages.Add(tp3d);
+            topTabs.SelectedIndexChanged += (s, e) => last3d = DateTime.MinValue;
+            split.Panel1.Controls.Add(topTabs);
 
             var tabs = new TabControl { Dock = DockStyle.Fill };
             var tpEv = new TabPage("사건 기록 (PC·프린터 조작)");
@@ -522,6 +535,7 @@ namespace CremakerControl
             bool printing = det.LooksPrinting(st, Ts(now));
             SetText(lbMode, link == null || !link.Connected ? "-" : printing ? "출력 중" : det.Busy ? "처리 중" : det.Moving ? "이동 중" : st.Tt > 0 || st.Bt > 0 ? "가열 · 대기" : "대기");
             ShowJob(now);
+            Update3D(now);
             SetText(lbSpeed, (st.Feed >= 0 ? st.Feed + " %" : "-") + " / " + (st.Flow >= 0 ? st.Flow + " %" : "-"));
             bool conn = link != null && link.Connected;
             bool unlock = conn && !printing;
@@ -569,21 +583,60 @@ namespace CremakerControl
             }
         }
 
-        void OpenGcode()
+        // 3D 보기 진행: 화면 보고(바이트 위치)가 있으면 정확히, 없으면 출력 높이의 층으로. 그 근처에서 노즐 위치가 올라 있는 선을 찾는다.
+        void Update3D(DateTime now)
+        {
+            var g = gfile;
+            if (g == null || topTabs.SelectedTab != tp3d || (now - last3d).TotalSeconds < 1) return;
+            last3d = now;
+            int done = -1;
+            string how;
+            if (st.TftOn && (now - tftAt).TotalSeconds < 90 && g.Size == st.TftSize)
+            {
+                int k = g.CountAtOffset(st.TftPos);
+                int loc = st.HasPos ? g.Locate(k - 2000, k + 3000, st.X, st.Y, st.Z, k) : -1;   // 보고는 30초마다라 노즐이 k 보다 앞설 수 있다
+                done = loc > 0 ? loc : k;
+                how = "화면 보고 " + st.TftPercent.ToString("0.0", Inv) + " %";
+            }
+            else if (st.TftOn && (now - tftAt).TotalSeconds < 90)
+                how = "화면에서 출력 중인 파일과 크기가 다릅니다 — 같은 파일을 여세요";
+            else if (job.On && !double.IsNaN(job.PrintZ) && g.LayerAt(job.PrintZ) >= 0)
+            {
+                int layer = g.LayerAt(job.PrintZ), a = g.FirstOfLayer(layer), b = g.FirstOfLayer(layer + 1);
+                int loc = st.HasPos ? g.Locate(a, b, st.X, st.Y, st.Z, b) : -1;
+                done = loc > 0 ? loc : a;
+                how = "출력 높이로 추정 (화면 보고 없음)";
+            }
+            else how = "출력 중 아님 — 파일 전체 미리 보기";
+            string head = g.Name + "\n";
+            if (done >= 0)
+            {
+                int layerNo = done > 0 ? g.Segs[done - 1].Layer + 1 : 0;
+                view3d.SetProgress(done, st.HasPos ? st.X : double.NaN, st.Y, st.Z, head + layerNo + " / " + g.Layers + "층 · " + how);
+            }
+            else view3d.SetProgress(-1, double.NaN, 0, 0, head + g.Layers + "층 · " + how);
+        }
+
+        async void OpenGcode()
         {
             using (var d = new OpenFileDialog { Title = "화면에서 출력 중인 것과 같은 G코드 파일", Filter = "G코드 (*.gcode;*.gco;*.g)|*.gcode;*.gco;*.g|모든 파일 (*.*)|*.*" })
             {
                 if (d.ShowDialog(this) != DialogResult.OK) return;
                 GcodeInfo g;
-                try { g = GcodeInfo.Parse(System.IO.File.ReadLines(d.FileName), System.IO.Path.GetFileName(d.FileName)); }
-                catch (Exception e) { MessageBox.Show(this, "파일을 읽을 수 없습니다:\n" + e.Message, App.Name); return; }
+                string path = d.FileName, before = lbFile.Text;
+                lbFile.Text = "읽는 중… (큰 파일은 몇 초 걸림)";
+                try { g = await Task.Run(() => GcodeInfo.Load(path)); }   // 38 MB 파일이 약 7초 — 창이 멈추지 않게
+                catch (Exception e) { lbFile.Text = before; MessageBox.Show(this, "파일을 읽을 수 없습니다:\n" + e.Message, App.Name); return; }
+                lbFile.Text = before;
                 if (g.Layers == 0 || g.TotalTime <= 0)
                 {
                     MessageBox.Show(this, "층 정보(;LAYER:)나 예상 시간(;TIME:)이 없는 파일입니다.\nCura 로 만든 G코드여야 진행률을 계산할 수 있습니다.", App.Name);
                     return;
                 }
-                g.Size = new System.IO.FileInfo(d.FileName).Length;
                 gfile = g;
+                view3d.File = g;
+                last3d = DateTime.MinValue;
+                topTabs.SelectedTab = tp3d;
                 lbFile.Text = g.Name + "\n" + g.Layers + "층 · 예상 " + PrintTracker.Hm(g.TotalTime) + " (Z " + g.LayerZ[g.Layers - 1].ToString("0.##", Inv) + " mm)";
                 AddEvent(new Ev(DateTime.Now, "상태", "출력 파일 맞춤: " + g.Name + " — " + g.Layers + "층, 예상 " + PrintTracker.Hm(g.TotalTime)));
             }

@@ -68,6 +68,19 @@ namespace CremakerControl
                 ";LAYER:2", "G0 X10 Y10 Z0.7", "M83", "G1 X20 Y10 E0.4", ";TIME_ELAPSED:1000" }, "t.gcode");
             Check("G코드 층·Z·시간", gc.Layers == 3 && gc.LayerZ.SequenceEqual(new[] { 0.3, 0.5, 0.7 }) && gc.LayerStart.SequenceEqual(new[] { 0.0, 200, 600 }) && gc.TotalTime == 1000);
             Check("Z 로 층 찾기", gc.LayerAt(0.3) == 0 && gc.LayerAt(0.5) == 1 && gc.LayerAt(0.2) == -1 && gc.LayerAt(9) == 2);
+            // 3D 보기용 압출 선: 거의 일직선이면 합침, 종류(;TYPE:), 바이트 위치
+            var g3 = GcodeInfo.Parse(new[] { ";LAYER:0", "M83", ";TYPE:WALL-OUTER", "G0 X0 Y0 Z0.2", "G1 X10 Y0 E1", "G1 X20 Y0.001 E1", "G1 X20 Y10 E1",
+                ";TYPE:FILL", "G1 X10 Y10 E1", "G1 E-1", "G0 X0 Y0", ";LAYER:1", ";TYPE:WALL-OUTER", "G0 X0 Y0 Z0.4", "G1 X10 Y0 E1" }, "s.gcode");
+            Check("압출 선 합치기·종류", g3.Segs.Count == 4 && g3.Segs[0].X1 == 20 && g3.Segs[0].Kind == 0 && g3.Segs[2].Kind == 3 && g3.Segs[3].Layer == 1
+                && g3.MaxX == 20 && g3.MaxY == 10 && Math.Abs(g3.MaxZ - 0.4) < 1e-6);
+            Check("바이트 위치로 선 수", g3.CountAtOffset(g3.Segs[0].End) == 1 && g3.CountAtOffset(g3.Segs[0].End - 1) == 0 && g3.CountAtOffset(long.MaxValue) == 4);
+            Check("노즐 위치로 선 찾기", g3.Locate(0, 4, 20, 5, 0.2, 4) == 2 && g3.Locate(0, 4, 50, 50, 0.2, 4) == -1 && g3.Locate(0, 4, 5, 0, 0.4, 4) == 4
+                && g3.FirstOfLayer(1) == 3);
+            string gtmp = Path.Combine(Path.GetTempPath(), "cremaker_selftest_" + Guid.NewGuid().ToString("N") + ".gcode");
+            File.WriteAllText(gtmp, ";LAYER:0\r\nG0 X0 Y0 Z0.2\r\nG1 X10 Y0 E1\r\n", new UTF8Encoding(false));
+            var gl = GcodeInfo.Load(gtmp);
+            Check("파일 바이트 위치 (CRLF)", gl.Size == new FileInfo(gtmp).Length && gl.Segs.Count == 1 && gl.Segs[0].End == gl.Size);
+            File.Delete(gtmp);
             var tr = new PrintTracker();
             var ps = new PrinterState { T = 200, Tt = 200, X = 10, Y = 10, Z = 0.5, E = 0 };
             var t0 = new DateTime(2026, 11, 20, 10, 0, 0);
