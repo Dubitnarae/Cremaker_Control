@@ -336,7 +336,7 @@ namespace CremakerControl
                 string c = Link.StripComment(c0);
                 if (c == "") continue;
                 det.PcSent(Parser.KindOf(c), ts);
-                if (!IsPoll(c)) shown.Add(c);
+                if (!Parser.IsPoll(c)) shown.Add(c);
             }
             if (shown.Count > 0) AddEvent(new Ev(DateTime.Now, "PC", "보냄: " + string.Join(" · ", shown)));
             link.Send(cmds);
@@ -456,7 +456,7 @@ namespace CremakerControl
                     else if (line.StartsWith("echo:") && !line.StartsWith("echo:busy") && !line.Contains("Flow:"))
                         AddEvent(new Ev(t, "프린터", line.Substring(5).Trim()));
                 }
-                if (!(cbHideReports.Checked && (dir == "<" ? Parser.IsReport(line) : IsPoll(line))))
+                if (!(cbHideReports.Checked && (dir == "<" ? Parser.IsReport(line) : Parser.IsPoll(line))))
                     sb.Append(t.ToString("HH:mm:ss.fff", Inv)).Append(' ').Append(dir).Append(' ').Append(line).Append("\r\n");
             }
             foreach (var e in det.Update(st, Parser.None, Ts(now), now)) AddEvent(e);   // 이동 멈춤 판정
@@ -484,8 +484,6 @@ namespace CremakerControl
             }
             ShowState(now);
         }
-
-        static bool IsPoll(string c) { return c == "M220" || c == "M221"; }
 
         void AppendConsole(string text)
         {

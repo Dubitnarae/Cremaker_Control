@@ -146,6 +146,9 @@ namespace CremakerControl
                 || line.StartsWith("FR:") || line.Contains(" Flow: ") || line.StartsWith("echo:busy") || line.StartsWith("TFT_PROGRESS P");
         }
 
+        // 5초마다 보내는 속도·유량 질문
+        public static bool IsPoll(string c) { return c == "M220" || c == "M221"; }
+
         // PC에서 보낸 명령이 무엇을 바꾸는지 (출처 판단용)
         public static string KindOf(string cmd)
         {
@@ -346,7 +349,7 @@ namespace CremakerControl
         bool moving, tReached = true, bReached = true;
         double lastMoveTs = -1e9, lastETs = -1e9, moveStartE;
         string moveSrc = "";
-        bool moveLogical, busy;
+        bool moveLogical, busy, busyShown;
         double busyStart, lastBusy;
         long startCX, startCY, startCZ;
         int lastSdTenth = -1;
@@ -414,13 +417,18 @@ namespace CremakerControl
             }
             if ((what & Parser.Busy) != 0)
             {
-                if (!busy) { busy = true; busyStart = ts; evs.Add(new Ev(now, SrcAny(ts), "프린터 처리 중 (홈·레벨링·가열 대기 같은 오래 걸리는 명령)")); }
+                if (!busy)
+                {
+                    busy = true; busyStart = ts;
+                    busyShown = !LooksPrinting(s, ts);   // 출력 중 busy 는 버퍼가 차서 기다리는 것뿐이라 사건으로 안 남긴다
+                    if (busyShown) evs.Add(new Ev(now, SrcAny(ts), "프린터 처리 중 (홈·레벨링·가열 대기 같은 오래 걸리는 명령)"));
+                }
                 lastBusy = ts;
             }
             if (busy && ts - lastBusy > 3.5)   // busy 는 2초마다 오므로 3.5초 안 오면 끝난 것
             {
                 busy = false;
-                evs.Add(new Ev(now, "상태", "처리 끝 (약 " + (lastBusy - busyStart + 2).ToString("0", Parser.Inv) + "초 걸림)"));
+                if (busyShown) evs.Add(new Ev(now, "상태", "처리 끝 (약 " + (lastBusy - busyStart + 2).ToString("0", Parser.Inv) + "초 걸림)"));
             }
             if (moving && !busy && ts - lastMoveTs >= StopAfter)   // 처리 중(홈 등)에는 잠깐 멈춰도 같은 동작으로 본다
             {
@@ -493,7 +501,26 @@ namespace CremakerControl
 
         public void State(DateTime t, PrinterState s) { state.WriteLine(StateRow(t, s)); }
         public void Event(Ev e) { events.WriteLine(EventRow(e)); }
-        public void Serial(DateTime t, string dir, string line) { serial.WriteLine(t.ToString("HH:mm:ss.fff", Parser.Inv) + " " + dir + " " + line); }
+        readonly Dictionary<string, Tuple<DateTime, string>> lastReport = new Dictionary<string, Tuple<DateTime, string>>();
+        bool afterPoll;
+
+        // 통신 원문. 크기를 줄이려고 폴링 질문·그 ok, 앞과 똑같은 자동 보고는 안 적고,
+        // 온도·위치 보고는 10초에 한 번만 적는다 (값은 state.csv 에 1초마다 있음)
+        public void Serial(DateTime t, string dir, string line)
+        {
+            if (dir == ">") { afterPoll = Parser.IsPoll(line); if (afterPoll) return; }
+            else if (line == "ok") { if (afterPoll) { afterPoll = false; return; } }
+            else if (Parser.IsReport(line) && !line.StartsWith("echo:busy"))   // busy 는 걸린 시간을 보려고 다 적는다
+            {
+                string key = RxNum.Replace(line, "#");   // 숫자만 다른 줄은 같은 종류
+                Tuple<DateTime, string> last;
+                bool tempPos = line.StartsWith("X:") || line.TrimStart().StartsWith("T:");
+                if (lastReport.TryGetValue(key, out last) && (last.Item2 == line || tempPos && (t - last.Item1).TotalSeconds < 10)) return;
+                lastReport[key] = Tuple.Create(t, line);
+            }
+            serial.WriteLine(t.ToString("HH:mm:ss.fff", Parser.Inv) + " " + dir + " " + line);
+        }
+        static readonly Regex RxNum = new Regex(@"-?\d+(\.\d+)?");
 
         public void Dispose()
         {

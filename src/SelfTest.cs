@@ -153,7 +153,19 @@ namespace CremakerControl
             var h3 = dh.Update(ph, Parser.None, 26.6, now);
             Check("처리 끝 + 걸린 시간", h3.Any(e => e.Text == "처리 끝 (약 22초 걸림)") && !dh.Busy);
             Check("모터 움직임 멈춤 + 카운트", h3.Any(e => e.Text.StartsWith("모터 움직임 멈춤") && e.Text.Contains("X -640→130 Y -480→18400")) && !dh.Moving);
+            // 출력 중(압출 계속) busy 는 버퍼 가득 대기 → 사건 없음 (2026-11-21 첫 출력 로그에서 약 60번)
+            var dp = new Detector();
+            var pp = new PrinterState();
+            Func<string, double, List<Ev>> P = (line, t) => dp.Update(pp, Parser.Apply(line, pp), t, now);
+            P(" T:205.0 /205.00 B:60.0 /60.00 @:90 B@:40", 0);
+            P("X:10.0000 Y:10.0000 Z:0.2000 E:1.0000 Count X:0 Y:0 Z:0", 0);
+            P("X:11.0000 Y:10.0000 Z:0.2000 E:2.0000 Count X:0 Y:0 Z:0", 1);
+            var pb = P("echo:busy: processing", 2);
+            var pe = dp.Update(pp, Parser.None, 6, now);
+            Check("출력 중 busy 는 사건 없음", !pb.Any(e => e.Text.Contains("처리")) && !pe.Any(e => e.Text.Contains("처리")) && !dp.Busy);
+
             var ch = new PrinterState();
+
             Parser.Apply("X:1.0000 Y:2.0000 Z:3.0000 E:0.0000 Count X:80 Y:160 Z:2400", ch);
             Check("상태 줄 카운트 열", LogWriter.StateRow(new DateTime(2026, 11, 19), ch).EndsWith(",80,160,2400"));
 
@@ -170,6 +182,18 @@ namespace CremakerControl
                 lw.Event(new Ev(DateTime.Now, "프린터", "노즐 목표 0 → 200 °C"));
                 lw.Serial(DateTime.Now, "<", "ok");
             }
+            using (var lw = new LogWriter(tmp, new DateTime(2026, 11, 19, 21, 5, 8)))
+            {
+                var tl = DateTime.Now;
+                foreach (var x in new[] { ">|M220", "<|FR:100%", "<|ok", ">|M220", "<|FR:100%", "<|ok", ">|M220", "<|FR:120%", "<|ok",
+                    ">|G28", "<|ok", "<|Not SD printing", "<|Not SD printing", "<|X:1.0000 Y:2.0000 Z:0.0000 E:0.0000 Count X:80 Y:160 Z:0",
+                    "<|X:1.0000 Y:2.0000 Z:0.0000 E:0.0000 Count X:80 Y:160 Z:0", "<|X:2.0000 Y:2.0000 Z:0.0000 E:0.0000 Count X:160 Y:160 Z:0",
+                    "<|echo:busy: processing", "<|echo:busy: processing" })
+                    lw.Serial(tl, x.Substring(0, 1), x.Substring(2));
+                lw.Serial(tl.AddSeconds(10), "<", "X:3.0000 Y:2.0000 Z:0.0000 E:0.0000 Count X:240 Y:160 Z:0");
+            }
+            var sl = File.ReadAllLines(Path.Combine(tmp, "2026-11-19", "210508_serial.txt")).Select(x => x.Substring(13)).ToArray();
+            Check("serial 로그 줄이기 (폴링·반복 보고 빼기, 위치 10초에 한 번)", string.Join("|", sl) == "< FR:100%|< FR:120%|> G28|< ok|< Not SD printing|< X:1.0000 Y:2.0000 Z:0.0000 E:0.0000 Count X:80 Y:160 Z:0|< echo:busy: processing|< echo:busy: processing|< X:3.0000 Y:2.0000 Z:0.0000 E:0.0000 Count X:240 Y:160 Z:0");
             string dir = Path.Combine(tmp, "2026-11-19");
             Check("로그 파일 3개", File.Exists(Path.Combine(dir, "210507_state.csv")) && File.Exists(Path.Combine(dir, "210507_events.csv")) && File.Exists(Path.Combine(dir, "210507_serial.txt")));
             Check("CSV 는 BOM + 머리줄", File.ReadAllBytes(Path.Combine(dir, "210507_events.csv")).Take(3).SequenceEqual(new byte[] { 0xEF, 0xBB, 0xBF })
