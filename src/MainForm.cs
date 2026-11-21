@@ -77,6 +77,7 @@ namespace CremakerControl
             MinimumSize = new Size(1100, 700);
             StartPosition = FormStartPosition.CenterScreen;
             BuildUi();
+            Theme.Apply(this);
             RefreshPorts();
             tick.Tick += (s, e) => OnTick();
             tick.Start();
@@ -91,7 +92,7 @@ namespace CremakerControl
         // ---------- 화면 만들기 ----------
         Button Btn(Control parent, string text, int x, int y, int w, int h, Action onClick)
         {
-            var b = new Button { Text = text, Location = new Point(x, y), Size = new Size(w, h), UseVisualStyleBackColor = true };
+            var b = new RoundButton { Text = text, Location = new Point(x, y), Size = new Size(w, h) };
             b.Click += (s, e) => onClick();
             parent.Controls.Add(b);
             return b;
@@ -120,6 +121,8 @@ namespace CremakerControl
             top.Controls.Add(cbPort);
             Btn(top, "새로고침", 270, 7, 70, 26, RefreshPorts);
             btnConnect = Btn(top, "연결", 346, 7, 80, 26, () => { if (link == null) Connect(); else Disconnect(); });
+            btnConnect.BackColor = Theme.Accent;
+            btnConnect.ForeColor = Color.White;
             lbConn = Lbl(top, "연결 안 됨", 436, 12, 250, 20);
             var tools = new ContextMenuStrip();
             tools.Items.Add("알림 · 필라멘트 설정…", null, (s, e) => EditSettings());
@@ -172,19 +175,25 @@ namespace CremakerControl
 
             // 가운데: 그래프 + 탭
             var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, SplitterDistance = 330 };
-            chart = new Chart { Dock = DockStyle.Fill, BackColor = Color.White };
+            chart = new Chart { Dock = DockStyle.Fill, BackColor = Theme.Card };
             var area = new ChartArea("t");
             area.AxisX.LabelStyle.Format = "HH:mm:ss";
-            area.AxisX.MajorGrid.LineColor = Color.Gainsboro;
-            area.AxisY.MajorGrid.LineColor = Color.Gainsboro;
+            foreach (var ax in new[] { area.AxisX, area.AxisY })
+            {
+                ax.MajorGrid.LineColor = Theme.Line;
+                ax.LineColor = Theme.Line;
+                ax.MajorTickMark.LineColor = Theme.Line;
+                ax.LabelStyle.ForeColor = Theme.Sub;
+                ax.TitleForeColor = Theme.Sub;
+            }
             area.AxisY.Title = "°C";
             area.AxisY.Minimum = 0;
             chart.ChartAreas.Add(area);
-            chart.Legends.Add(new Legend { Docking = Docking.Top, Alignment = StringAlignment.Center });
-            AddSeries("노즐", Color.OrangeRed, 2);
-            AddSeries("노즐 목표", Color.FromArgb(255, 170, 150), 1);
-            AddSeries("베드", Color.RoyalBlue, 2);
-            AddSeries("베드 목표", Color.FromArgb(150, 170, 240), 1);
+            chart.Legends.Add(new Legend { Docking = Docking.Top, Alignment = StringAlignment.Center, BackColor = Color.Transparent, ForeColor = Theme.Sub });
+            AddSeries("노즐", Theme.Orange, 2);
+            AddSeries("노즐 목표", Color.FromArgb(255, 205, 140), 1);
+            AddSeries("베드", Theme.Accent, 2);
+            AddSeries("베드 목표", Color.FromArgb(140, 190, 255), 1);
             topTabs = new TabControl { Dock = DockStyle.Fill };
             var tpChart = new TabPage("온도 그래프");
             tpChart.Controls.Add(chart);
@@ -204,7 +213,7 @@ namespace CremakerControl
             lvEvents.Columns.Add("내용", 520);
             tpEv.Controls.Add(lvEvents);
             var tpCon = new TabPage("통신 콘솔");
-            tbConsole = new TextBox { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Font = new Font("Consolas", 9f), BackColor = Color.White, WordWrap = false };
+            tbConsole = new TextBox { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Font = new Font("Consolas", 9f), BackColor = Theme.Card, WordWrap = false };
             var bar = new Panel { Dock = DockStyle.Bottom, Height = 32 };
             tbCmd = new TextBox { Location = new Point(4, 5), Width = 360 };
             tbCmd.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; SendConsole(); } };
@@ -244,7 +253,7 @@ namespace CremakerControl
         void BuildControls(Panel p)
         {
             // 이동
-            var g = new GroupBox { Text = "이동", Location = new Point(6, 4), Size = new Size(322, 236) };
+            var g = new CardBox { Text = "이동", Location = new Point(6, 4), Size = new Size(322, 236) };
             p.Controls.Add(g);
             var steps = new[] { 0.1, 1, 10, 50 };
             for (int i = 0; i < steps.Length; i++)
@@ -269,7 +278,7 @@ namespace CremakerControl
             motionControls.Add(Btn(g, "모터 끄기", 234, hy, 76, 28, () => Cmd("M84")));
 
             // 온도
-            var t = new GroupBox { Text = "온도 (°C)", Location = new Point(6, 246), Size = new Size(322, 128) };
+            var t = new CardBox { Text = "온도 (°C)", Location = new Point(6, 246), Size = new Size(322, 128) };
             p.Controls.Add(t);
             Lbl(t, "노즐", 12, 26, 40, 20);
             nuNozzle = Num(t, 54, 22, 70, 0, Machine.HotendMax, 200, 0);
@@ -285,7 +294,7 @@ namespace CremakerControl
             needConn.Add(Btn(t, "모두 냉각", 204, 88, 106, 28, () => Cmd("M104 S0\nM140 S0")));
 
             // 압출
-            var x = new GroupBox { Text = "압출 (노즐 " + Machine.ExtrudeMin + " °C 이상)", Location = new Point(6, 380), Size = new Size(322, 62) };
+            var x = new CardBox { Text = "압출 (노즐 " + Machine.ExtrudeMin + " °C 이상)", Location = new Point(6, 380), Size = new Size(322, 62) };
             p.Controls.Add(x);
             nuExtrude = Num(x, 12, 26, 60, 1, 100, 10, 0);
             Lbl(x, "mm", 76, 29, 30, 20);
@@ -293,7 +302,7 @@ namespace CremakerControl
             motionControls.Add(Btn(x, "되감기", 212, 22, 96, 28, () => Extrude(-1)));
 
             // 팬·속도·유량
-            var f = new GroupBox { Text = "팬 · 속도 · 유량 (%)", Location = new Point(6, 448), Size = new Size(322, 124) };
+            var f = new CardBox { Text = "팬 · 속도 · 유량 (%)", Location = new Point(6, 448), Size = new Size(322, 124) };
             p.Controls.Add(f);
             Lbl(f, "팬", 12, 26, 60, 20);
             nuFan = Num(f, 74, 22, 60, 0, 100, 100, 0);
@@ -307,7 +316,7 @@ namespace CremakerControl
             needConn.Add(Btn(f, "적용", 140, 84, 60, 26, () => Cmd("M221 S" + nuFlow.Value.ToString(Inv) + "\nM221")));
 
             // 챔버 조명(메인보드 v1.2 M355) · 설정 백업
-            var c = new GroupBox { Text = "챔버 조명 · 설정 백업", Location = new Point(6, 578), Size = new Size(322, 92) };
+            var c = new CardBox { Text = "챔버 조명 · 설정 백업", Location = new Point(6, 578), Size = new Size(322, 92) };
             p.Controls.Add(c);
             Lbl(c, "조명", 12, 26, 40, 20);
             needConn.Add(Btn(c, "켜기", 74, 20, 60, 26, () => Cmd("M355 S1 P255")));   // 화면 v1.4 와 같은 명령
@@ -318,7 +327,7 @@ namespace CremakerControl
             lbLock = Lbl(p, "", 10, 676, 318, 36);
             lbLock.ForeColor = Color.DarkOrange;
 
-            btnEstop = new Button { Text = "비상 정지 (M112)", Location = new Point(6, 714), Size = new Size(322, 56), BackColor = Color.FromArgb(220, 40, 40), ForeColor = Color.White, Font = new Font("맑은 고딕", 13f, FontStyle.Bold), FlatStyle = FlatStyle.Flat };
+            btnEstop = new RoundButton { Text = "비상 정지 (M112)", Location = new Point(6, 714), Size = new Size(322, 56), BackColor = Theme.Red, ForeColor = Color.White, Font = new Font("맑은 고딕", 13f, FontStyle.Bold) };
             btnEstop.Click += (s, e) => Estop();
             p.Controls.Add(btnEstop);
             needConn.Add(btnEstop);
@@ -701,7 +710,7 @@ namespace CremakerControl
             if (ver == "") { lbFw.Text = ""; return; }
             string head = "메인보드 펌웨어 " + ver + (latest ? " (최신)" : " — " + Parser.LatestBoard + " 업데이트 권장");
             lbFw.Text = head + "\n" + detail;
-            lbFw.ForeColor = latest ? Color.DimGray : Color.DarkOrange;
+            lbFw.ForeColor = latest ? Theme.Sub : Theme.Orange;
             AddEvent(new Ev(DateTime.Now, "상태", head + " · " + detail));
         }
 
@@ -719,10 +728,10 @@ namespace CremakerControl
             if (log != null) log.Event(e);
             if (e.Source == "오류" || e.Source == "경고") Notify(e.Source == "오류" ? "프린터 오류" : "프린터 경고", e.Text, "alert:" + e.Text, 120);
             var it = new ListViewItem(new[] { e.Time.ToString("HH:mm:ss", Inv), e.Source, e.Text });
-            if (e.Source == "프린터") it.ForeColor = Color.RoyalBlue;
-            else if (e.Source == "오류") { it.ForeColor = Color.White; it.BackColor = Color.Firebrick; }
-            else if (e.Source == "상태") it.ForeColor = Color.DimGray;
-            else if (e.Source == "경고") { it.ForeColor = Color.Black; it.BackColor = Color.Gold; }
+            if (e.Source == "프린터") it.ForeColor = Theme.Accent;
+            else if (e.Source == "오류") { it.ForeColor = Color.FromArgb(200, 20, 20); it.BackColor = Theme.Pink; }
+            else if (e.Source == "상태") it.ForeColor = Theme.Sub;
+            else if (e.Source == "경고") { it.ForeColor = Theme.Text; it.BackColor = Theme.Yellow; }
             lvEvents.BeginUpdate();
             lvEvents.Items.Add(it);
             while (lvEvents.Items.Count > 3000) lvEvents.Items.RemoveAt(0);
@@ -759,11 +768,12 @@ namespace CremakerControl
                     var tb = new TextBox { Location = new Point(186, y), Width = 262, Text = pairs[i + 1] };
                     f.Controls.Add(tb); boxes.Add(tb); y += 30;
                 }
-                var ok = new Button { Text = "확인", DialogResult = DialogResult.OK, Location = new Point(286, y + 6), Size = new Size(78, 28) };
-                var no = new Button { Text = "취소", DialogResult = DialogResult.Cancel, Location = new Point(370, y + 6), Size = new Size(78, 28) };
+                var ok = new RoundButton { BackColor = Theme.Accent, ForeColor = Color.White, Text = "확인", DialogResult = DialogResult.OK, Location = new Point(286, y + 6), Size = new Size(78, 28) };
+                var no = new RoundButton { Text = "취소", DialogResult = DialogResult.Cancel, Location = new Point(370, y + 6), Size = new Size(78, 28) };
                 f.Controls.Add(ok); f.Controls.Add(no);
                 f.AcceptButton = ok; f.CancelButton = no;
                 f.ClientSize = new Size(460, y + 46);
+                Theme.Apply(f);
                 return f.ShowDialog(this) == DialogResult.OK ? boxes.Select(b => b.Text.Trim()).ToArray() : null;
             }
         }

@@ -133,7 +133,7 @@ namespace CremakerControl
             {
                 var c = P(nx, ny, nz);
                 gr.SmoothingMode = SmoothingMode.AntiAlias;
-                using (var b = new SolidBrush(Color.Red)) gr.FillEllipse(b, c.X - 5, c.Y - 5, 10, 10);
+                using (var b = new SolidBrush(Theme.Red)) gr.FillEllipse(b, c.X - 5, c.Y - 5, 10, 10);
                 using (var w = new Pen(Color.White, 2)) gr.DrawEllipse(w, c.X - 5, c.Y - 5, 10, 10);
             }
             LastRenderMs = (DateTime.UtcNow - t0).TotalMilliseconds;
@@ -145,7 +145,7 @@ namespace CremakerControl
             if (g == null)
             {
                 gr.Clear(BackColor);
-                TextRenderer.DrawText(gr, "왼쪽 '출력 파일 맞추기'로 Cura G코드를 열면 여기에 3D로 보입니다.", Font, ClientRectangle, Color.DimGray,
+                TextRenderer.DrawText(gr, "왼쪽 '출력 파일 맞추기'로 Cura G코드를 열면 여기에 3D로 보입니다.", Font, ClientRectangle, Theme.Sub,
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
                 return;
             }
@@ -157,7 +157,7 @@ namespace CremakerControl
                 if (dirty) { using (var cg = Graphics.FromImage(cache)) Render(cg, ClientSize, false); dirty = false; }
                 gr.DrawImageUnscaled(cache, 0, 0);
             }
-            TextRenderer.DrawText(gr, info, Font, new Point(8, 6), Color.Black);
+            TextRenderer.DrawText(gr, info, Font, new Point(8, 6), Theme.Text);
             TextRenderer.DrawText(gr, "왼쪽 끌기 돌리기 · 오른쪽 끌기 옮기기 · 휠 확대 · 두 번 클릭 처음 보기", Font,
                 new Point(8, ClientSize.Height - 20), Color.Gray);
         }
