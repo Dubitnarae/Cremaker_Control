@@ -5,7 +5,7 @@ Set-Location $PSScriptRoot
 $csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 if (-not (Test-Path $csc)) { $csc = "$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\csc.exe" }
 New-Item -ItemType Directory -Force dist | Out-Null
-& $csc /nologo /codepage:65001 /target:winexe /optimize+ /out:dist\Cremaker_Control.exe `
+& $csc /nologo /codepage:65001 /target:winexe /optimize+ /win32icon:icon.ico /out:dist\Cremaker_Control.exe `
   /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Web.Extensions.dll /r:System.Windows.Forms.DataVisualization.dll /r:System.Management.dll `
   src\*.cs
 if ($LASTEXITCODE -ne 0) { throw "컴파일 실패" }

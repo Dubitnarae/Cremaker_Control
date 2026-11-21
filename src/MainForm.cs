@@ -58,6 +58,7 @@ namespace CremakerControl
         public MainForm()
         {
             Text = App.Name + " v" + App.Version;
+            try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch (Exception) { }
             Font = UiFont;
             ClientSize = new Size(1280, 800);
             MinimumSize = new Size(1100, 700);
