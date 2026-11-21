@@ -55,6 +55,19 @@ namespace CremakerControl
         double step = 10;
         NumericUpDown nuNozzle, nuBed, nuExtrude, nuFan, nuFeed, nuFlow;
 
+        // v0.2.0: 알림·출력 기록·온도 감시·PID·드라이버 점검
+        NotifyIcon tray;
+        readonly NotifyGate gate = new NotifyGate();
+        readonly TempWatch tempWatch = new TempWatch();
+        bool jobWasOn;
+        double jobTftMax = -1;
+        long jobTftSize;
+        ListView lvJobs;
+        Label lbJobSum;
+        bool pidOn, pidDone, pidFail, drvOn;
+        readonly List<double[]> pidVals = new List<double[]>();
+        DriverCheck drv;
+
         public MainForm()
         {
             Text = App.Name + " v" + App.Version;
@@ -68,7 +81,10 @@ namespace CremakerControl
             tick.Tick += (s, e) => OnTick();
             tick.Start();
             Shown += (s, e) => { CheckUpdate(); if (cbPort.Items.Count > 0 && cbPort.Text.Contains("3D 프린터")) Connect(); };
-            FormClosing += (s, e) => Disconnect();
+            FormClosing += (s, e) => { Disconnect(); tray.Visible = false; tray.Dispose(); };
+            tray = new NotifyIcon { Icon = Icon ?? SystemIcons.Application, Text = App.Name, Visible = true };
+            tray.DoubleClick += (s, e) => { if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal; Activate(); };
+            LoadJobs();
             SyncButtons();
         }
 
@@ -104,7 +120,14 @@ namespace CremakerControl
             top.Controls.Add(cbPort);
             Btn(top, "새로고침", 270, 7, 70, 26, RefreshPorts);
             btnConnect = Btn(top, "연결", 346, 7, 80, 26, () => { if (link == null) Connect(); else Disconnect(); });
-            lbConn = Lbl(top, "연결 안 됨", 436, 12, 330, 20);
+            lbConn = Lbl(top, "연결 안 됨", 436, 12, 250, 20);
+            var tools = new ContextMenuStrip();
+            tools.Items.Add("알림 · 필라멘트 설정…", null, (s, e) => EditSettings());
+            tools.Items.Add("노즐 PID 자동 조정…", null, (s, e) => StartPid());
+            tools.Items.Add("드라이버 · 원점 점검…", null, (s, e) => StartDriverCheck());
+            tools.Items.Add("출력 기록 파일 열기", null, (s, e) => { if (System.IO.File.Exists(JobLog.Path)) Process.Start(JobLog.Path); else MessageBox.Show(this, "아직 기록된 출력이 없습니다.", App.Name); });
+            Button btnTools = null;
+            btnTools = Btn(top, "도구 ▾", 690, 7, 76, 26, () => tools.Show(btnTools, 0, btnTools.Height));
             Btn(top, "로그 폴더 열기", 770, 7, 110, 26, OpenLogs);
             var about = Lbl(top, "v" + App.Version + "  ·  개발자 " + App.Author, 0, 12, 260, 20);
             about.Anchor = AnchorStyles.Top | AnchorStyles.Right;
@@ -191,8 +214,19 @@ namespace CremakerControl
             bar.Controls.Add(cbHideReports);
             tpCon.Controls.Add(tbConsole);
             tpCon.Controls.Add(bar);
+            var tpJobs = new TabPage("출력 기록");
+            lvJobs = new ListView { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, GridLines = true };
+            foreach (var h in JobRecord.Head) lvJobs.Columns.Add(h, h == "파일" || h == "메모" ? 180 : h == "시작" || h == "끝" ? 110 : 70);
+            lvJobs.DoubleClick += (s, e) => EditJob();
+            var jbar = new Panel { Dock = DockStyle.Bottom, Height = 32 };
+            Btn(jbar, "결과 · 메모 고치기", 4, 3, 130, 26, EditJob);
+            lbJobSum = Lbl(jbar, "", 142, 8, 600, 20);
+            lbJobSum.ForeColor = Color.DimGray;
+            tpJobs.Controls.Add(lvJobs);
+            tpJobs.Controls.Add(jbar);
             tabs.TabPages.Add(tpEv);
             tabs.TabPages.Add(tpCon);
+            tabs.TabPages.Add(tpJobs);
             split.Panel2.Controls.Add(tabs);
 
             Controls.Add(split);
@@ -459,6 +493,7 @@ namespace CremakerControl
                 string dir = item.Item2, line = item.Item3;
                 if (log != null) log.Serial(t, dir, line);
                 BackupLine(dir, line);
+                ExtraLine(dir, line);
                 if (dir == "<")
                 {
                     int what = Parser.Apply(line, st);
@@ -475,10 +510,16 @@ namespace CremakerControl
             }
             foreach (var e in det.Update(st, Parser.None, Ts(now), now)) AddEvent(e);   // 이동 멈춤 판정
             foreach (var e in job.Update(st, link != null && link.Connected && det.LooksPrinting(st, Ts(now)), now)) AddEvent(e);
+            JobWatch(now);
+            if (link != null && link.Connected) foreach (var e in tempWatch.Update(st, now)) AddEvent(e);
             if (sb.Length > 0) AppendConsole(sb.ToString());
 
             bool conn = link != null && link.Connected;
-            if (conn != wasConnected) { wasConnected = conn; SyncButtons(); }
+            if (conn != wasConnected)
+            {
+                if (!conn && job.On) Notify("연결 끊김", "출력 중에 프린터와 USB 연결이 끊겼습니다. (출력 자체는 화면이 계속할 수 있음)", "conn", 300);
+                wasConnected = conn; SyncButtons();
+            }
             if (link != null) lbConn.Text = conn ? link.Port + " 연결됨 · 기록 중" : link.Port + " 연결 기다리는 중 (3초마다 다시 시도)";
 
             if (conn && (now - lastPoll).TotalSeconds >= 5 && link.Pending == 0)
@@ -551,9 +592,16 @@ namespace CremakerControl
             if (st.TftOn && !tftWasOn)
                 AddEvent(new Ev(t, "프린터", "화면 출력 진행 보고 받음 — 파일 " + st.TftSize.ToString("N0", Inv) + " 바이트, " + st.TftPercent.ToString("0.0", Inv) + " %"));
             else if (!st.TftOn && tftWasOn)
+            {
                 AddEvent(new Ev(t, "프린터", "화면 출력 끝 (화면 보고) — 경과 " + PrintTracker.Hm(st.TftSec)));
+                Notify("출력 끝", (jobTftMax >= 99 ? "출력이 끝났습니다" : "출력이 " + jobTftMax.ToString("0", Inv) + " % 에서 끝났습니다 (취소?)") + " — 경과 " + PrintTracker.Hm(st.TftSec), "end", 600);
+            }
             else if (st.TftOn && st.TftPaused != tftWasPaused)
+            {
                 AddEvent(new Ev(t, "프린터", st.TftPaused ? "화면 출력 일시정지" : "화면 출력 다시 시작"));
+                if (st.TftPaused) Notify("출력 일시정지", "화면에서 출력이 일시정지되었습니다 (" + st.TftPercent.ToString("0", Inv) + " %). 필라멘트 끝·막힘인지 확인하세요.", "pause", 60);
+            }
+            if (st.TftOn) { jobTftMax = Math.Max(jobTftMax, st.TftPercent); jobTftSize = st.TftSize; }
             tftWasOn = st.TftOn; tftWasPaused = st.TftPaused;
         }
 
@@ -669,15 +717,228 @@ namespace CremakerControl
         void AddEvent(Ev e)
         {
             if (log != null) log.Event(e);
+            if (e.Source == "오류" || e.Source == "경고") Notify(e.Source == "오류" ? "프린터 오류" : "프린터 경고", e.Text, "alert:" + e.Text, 120);
             var it = new ListViewItem(new[] { e.Time.ToString("HH:mm:ss", Inv), e.Source, e.Text });
             if (e.Source == "프린터") it.ForeColor = Color.RoyalBlue;
             else if (e.Source == "오류") { it.ForeColor = Color.White; it.BackColor = Color.Firebrick; }
             else if (e.Source == "상태") it.ForeColor = Color.DimGray;
+            else if (e.Source == "경고") { it.ForeColor = Color.Black; it.BackColor = Color.Gold; }
             lvEvents.BeginUpdate();
             lvEvents.Items.Add(it);
             while (lvEvents.Items.Count > 3000) lvEvents.Items.RemoveAt(0);
             lvEvents.EndUpdate();
             it.EnsureVisible();
+        }
+
+        // ---------- 알림 ----------
+        // Windows 알림(작업 표시줄 아이콘 풍선) + 텔레그램(설정했을 때). 같은 key 는 sec 초 안에 다시 안 보낸다.
+        void Notify(string title, string text, string key, double sec)
+        {
+            if (!gate.Allow(key, DateTime.Now, sec)) return;
+            if (tray != null) tray.ShowBalloonTip(10000, title, text, title.Contains("오류") || title.Contains("경고") ? ToolTipIcon.Warning : ToolTipIcon.Info);
+            if (!Telegram.Configured) return;
+            string msg = "[" + App.Name + "] " + title + "\n" + text;
+            Task.Run(() =>
+            {
+                try { Telegram.Send(msg); }
+                catch (Exception e) { BeginInvoke((Action)(() => AddEvent(new Ev(DateTime.Now, "상태", "텔레그램 보내기 실패: " + e.Message)))); }
+            });
+        }
+
+        // 입력 창: pairs = 이름, 기본값, 이름, 기본값 … → 입력값들, 취소면 null
+        string[] Ask(string title, string note, params string[] pairs)
+        {
+            using (var f = new Form { Text = title, FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false, StartPosition = FormStartPosition.CenterParent, Font = UiFont, ClientSize = new Size(460, 10) })
+            {
+                int y = 12;
+                if (note != "") { var n = Lbl(f, note, 12, y, 436, 20); n.AutoSize = true; n.MaximumSize = new Size(436, 0); y += n.PreferredHeight + 10; }
+                var boxes = new List<TextBox>();
+                for (int i = 0; i + 1 < pairs.Length; i += 2)
+                {
+                    Lbl(f, pairs[i], 12, y + 3, 170, 20);
+                    var tb = new TextBox { Location = new Point(186, y), Width = 262, Text = pairs[i + 1] };
+                    f.Controls.Add(tb); boxes.Add(tb); y += 30;
+                }
+                var ok = new Button { Text = "확인", DialogResult = DialogResult.OK, Location = new Point(286, y + 6), Size = new Size(78, 28) };
+                var no = new Button { Text = "취소", DialogResult = DialogResult.Cancel, Location = new Point(370, y + 6), Size = new Size(78, 28) };
+                f.Controls.Add(ok); f.Controls.Add(no);
+                f.AcceptButton = ok; f.CancelButton = no;
+                f.ClientSize = new Size(460, y + 46);
+                return f.ShowDialog(this) == DialogResult.OK ? boxes.Select(b => b.Text.Trim()).ToArray() : null;
+            }
+        }
+
+        void EditSettings()
+        {
+            var v = Ask("알림 · 필라멘트 설정",
+                "텔레그램: @BotFather 로 봇을 만들어 받은 토큰과, 봇에게 말을 건 뒤 받은 채팅 ID 를 넣으세요. 비우면 Windows 알림만 띄웁니다. 값은 exe 옆 설정.ini 에 저장됩니다.",
+                "텔레그램 봇 토큰", Settings.Get("telegram_token", ""), "텔레그램 채팅 ID", Settings.Get("telegram_chat", ""),
+                "필라멘트 지름 (mm)", Settings.Num("filament_diameter", 1.75).ToString(Inv), "필라멘트 밀도 (g/cm³)", Settings.Num("filament_density", 1.24).ToString(Inv),
+                "1 kg 가격 (원)", Settings.Num("filament_won_per_kg", 20000).ToString(Inv));
+            if (v == null) return;
+            double dia, den, won;
+            if (!double.TryParse(v[2], System.Globalization.NumberStyles.Float, Inv, out dia) || dia <= 0 || dia > 5
+                || !double.TryParse(v[3], System.Globalization.NumberStyles.Float, Inv, out den) || den <= 0 || den > 10
+                || !double.TryParse(v[4], System.Globalization.NumberStyles.Float, Inv, out won) || won < 0)
+            { MessageBox.Show(this, "지름·밀도·가격은 숫자로 넣어 주세요 (예: 1.75 / 1.24 / 20000).", App.Name); return; }
+            Settings.Set("telegram_token", v[0]); Settings.Set("telegram_chat", v[1]);
+            Settings.Set("filament_diameter", v[2]); Settings.Set("filament_density", v[3]); Settings.Set("filament_won_per_kg", v[4]);
+            try { Settings.Save(); }
+            catch (Exception e) { MessageBox.Show(this, "설정을 저장할 수 없습니다:\n" + e.Message, App.Name); return; }
+            if (Telegram.Configured && MessageBox.Show(this, "텔레그램 시험 메시지를 보낼까요?", App.Name, MessageBoxButtons.YesNo) == DialogResult.Yes)
+            {
+                try { Telegram.Send("[" + App.Name + "] 시험 메시지입니다. 출력 끝·일시정지·오류·온도 이상을 여기로 알려 드립니다."); MessageBox.Show(this, "보냈습니다. 텔레그램을 확인하세요.", App.Name); }
+                catch (Exception e) { MessageBox.Show(this, "보내기 실패:\n" + e.Message + "\n\n토큰·채팅 ID 를 확인하세요.", App.Name); }
+            }
+        }
+
+        // ---------- 출력 기록장 ----------
+        void JobWatch(DateTime now)
+        {
+            if (job.On == jobWasOn) return;
+            jobWasOn = job.On;
+            if (job.On) return;
+            var end = job.LastPrinting;
+            double sec = (end - job.Start).TotalSeconds;
+            // 손으로 압출해 본 것 같은 짧은 움직임은 출력으로 치지 않는다
+            if (sec >= 180 || jobTftMax >= 0)
+            {
+                var g = gfile;
+                bool match = g != null && (jobTftSize == 0 || g.Size == jobTftSize);
+                var r = new JobRecord
+                {
+                    Start = job.Start, End = end, ExtrudedM = job.Extruded / 1000,
+                    File = match ? g.Name : jobTftSize > 0 ? "(화면 출력, " + jobTftSize.ToString("N0", Inv) + " 바이트)" : "",
+                    Expected = match ? g.TotalTime : double.NaN,
+                    Result = jobTftMax >= 99 ? "완료" : jobTftMax >= 0 ? "중단? (" + jobTftMax.ToString("0", Inv) + " %)" : "끝 (자동 감지)"
+                };
+                var cells = r.Row(Settings.Num("filament_diameter", 1.75), Settings.Num("filament_density", 1.24), Settings.Num("filament_won_per_kg", 20000));
+                try { JobLog.Append(JobLog.Path, cells); LoadJobs(); }
+                catch (Exception e) { AddEvent(new Ev(now, "상태", "출력 기록 저장 실패 (엑셀에서 열려 있나요?): " + e.Message)); }
+                Notify("출력 끝", "걸린 시간 " + cells[2] + " · 필라멘트 " + cells[7] + " g · " + r.Result + (r.File != "" ? "\n" + r.File : ""), "end", 600);
+            }
+            jobTftMax = -1; jobTftSize = 0;
+        }
+
+        void LoadJobs()
+        {
+            List<List<string>> rows;
+            try { rows = JobLog.Read(JobLog.Path); }
+            catch (Exception e) { lbJobSum.Text = "출력기록.csv 를 읽을 수 없습니다: " + e.Message; return; }
+            lvJobs.BeginUpdate();
+            lvJobs.Items.Clear();
+            for (int i = rows.Count - 1; i >= 0; i--)   // 최근 것이 위로
+            {
+                var it = new ListViewItem(rows[i].Take(JobRecord.Head.Length).ToArray()) { Tag = i };
+                lvJobs.Items.Add(it);
+            }
+            lvJobs.EndUpdate();
+            double g = 0, won = 0, x;
+            foreach (var r in rows)
+            {
+                if (r.Count > 7 && double.TryParse(r[7], System.Globalization.NumberStyles.Float, Inv, out x)) g += x;
+                if (r.Count > 8 && double.TryParse(r[8], System.Globalization.NumberStyles.Float, Inv, out x)) won += x;
+            }
+            lbJobSum.Text = "모두 " + rows.Count + "번 · 필라멘트 " + (g / 1000).ToString("0.00", Inv) + " kg · 약 " + won.ToString("N0", Inv) + " 원  (두 번 클릭하면 결과·메모 고치기)";
+        }
+
+        void EditJob()
+        {
+            if (lvJobs.SelectedItems.Count == 0) { MessageBox.Show(this, "고칠 줄을 먼저 고르세요.", App.Name); return; }
+            int idx = (int)lvJobs.SelectedItems[0].Tag;
+            try
+            {
+                var rows = JobLog.Read(JobLog.Path);
+                var r = rows[idx];
+                while (r.Count < JobRecord.Head.Length) r.Add("");
+                var v = Ask("결과 · 메모 고치기", r[0] + " 출력 " + r[3], "결과 (완료·실패·중단…)", r[9], "메모", r[10]);
+                if (v == null) return;
+                r[9] = v[0]; r[10] = v[1];
+                JobLog.Write(JobLog.Path, rows);
+                LoadJobs();
+            }
+            catch (Exception e) { MessageBox.Show(this, "저장할 수 없습니다 (엑셀에서 열려 있나요?):\n" + e.Message, App.Name); }
+        }
+
+        // ---------- PID 자동 조정 · 드라이버 점검 ----------
+        bool CanRunTool()
+        {
+            if (link == null || !link.Connected) { MessageBox.Show(this, "프린터에 먼저 연결하세요.", App.Name); return false; }
+            if (det.LooksPrinting(st, Ts(DateTime.Now))) { MessageBox.Show(this, "출력 중에는 할 수 없습니다.", App.Name); return false; }
+            if (pidOn || drvOn) { MessageBox.Show(this, "다른 점검이 아직 진행 중입니다.", App.Name); return false; }
+            return true;
+        }
+
+        void StartPid()
+        {
+            if (!CanRunTool()) return;
+            var v = Ask("노즐 PID 자동 조정 (M303)",
+                "노즐을 목표 온도 근처로 8번 올렸다 내리며 온도 제어 값을 새로 잡습니다 (5~10분). 출력할 때처럼 팬을 켠 채로 하면 팬 켜질 때 온도가 덜 처집니다. 끝나면 예전 값과 비교해 보여 주고, 저장(M500)할지 묻습니다. 노즐 근처에 손대지 마세요.",
+                "목표 온도 (°C)", "205", "팬 (%)", "50");
+            if (v == null) return;
+            int temp, fan;
+            if (!int.TryParse(v[0], out temp) || temp < 150 || temp > Machine.HotendMax || !int.TryParse(v[1], out fan) || fan < 0 || fan > 100)
+            { MessageBox.Show(this, "온도는 150~" + Machine.HotendMax + ", 팬은 0~100 으로 넣어 주세요.", App.Name); return; }
+            pidOn = true; pidDone = pidFail = false; pidVals.Clear();
+            // M301 (예전 값) → 팬 → M303 (U1 = 끝나면 바로 적용) → 팬 끄기 → M301 (새 값)
+            Cmd("M301\nM106 S" + (int)Math.Round(fan * 2.55) + "\nM303 E0 S" + temp + " C8 U1\nM107\nM301");
+        }
+
+        void StartDriverCheck()
+        {
+            if (!CanRunTool()) return;
+            if (MessageBox.Show(this, "드라이버 · 원점 점검\n\n각 축을 조금 움직이며(X·Y 60 mm 왕복, Z 10 mm 위로 갔다 내려옴) 드라이버 통신과 막힘 감지 신호(sg_result)를 읽습니다. 원점은 잡지 않습니다.\n\n시작 전에 헤드를 가운데 쪽(오른쪽·뒤쪽 끝에서 60 mm 넘게 떨어진 곳)에 두고, 베드 위에 물건이 없게 하세요.\n\n시작할까요?",
+                App.Name, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+            drv = new DriverCheck();
+            drvOn = true;
+            var c = new StringBuilder("M122\n");
+            foreach (var a in new[] { "X", "Y" }) c.Append("G91\nG1 " + a + "60 F3000\nM122\nM122\nM122\nG1 " + a + "-60 F3000\nM122\nM122\nM122\nG90\nM400\n");
+            c.Append("G91\nG1 Z10 F240\nM122\nM122\nM122\nG1 Z-10 F240\nM122\nM122\nM122\nG90\nM400\n");
+            c.Append("M118 P2 CC_DRVCHK_END");   // P2 = USB 로만 (화면에 안 뜨게)
+            Cmd(c.ToString());
+        }
+
+        void ExtraLine(string dir, string line)
+        {
+            if (drvOn)
+            {
+                if (dir == ">") drv.Sent(line);
+                else if (line == "CC_DRVCHK_END")
+                {
+                    drvOn = false;
+                    bool bad;
+                    var rep = drv.Report(out bad);
+                    AddEvent(new Ev(DateTime.Now, bad ? "경고" : "상태", "드라이버 점검 " + (bad ? "— 문제 있음: " : "— 정상: ") + string.Join(" · ", rep)));
+                    BeginInvoke((Action)(() => MessageBox.Show(this, string.Join("\n", rep) + (bad ? "\n\n문제가 있는 축은 드라이버 모듈을 다른 칸과 맞바꿔 보면 모듈 고장인지 알 수 있습니다." : "\n\n모두 정상입니다."),
+                        "드라이버 점검 결과", MessageBoxButtons.OK, bad ? MessageBoxIcon.Warning : MessageBoxIcon.Information)));
+                }
+                else drv.Got(line);
+            }
+            if (pidOn && dir == "<")
+            {
+                var p = Pid.FromM301(line);
+                if (p != null) pidVals.Add(p);
+                if (Pid.Finished(line)) pidDone = true;
+                if (Pid.Failed(line)) pidFail = true;
+                if (pidVals.Count >= 2)
+                {
+                    pidOn = false;
+                    var before = pidVals[0];
+                    var after = pidVals[1];
+                    if (pidFail || !pidDone)
+                    {
+                        AddEvent(new Ev(DateTime.Now, "경고", "PID 자동 조정 실패 — 값은 그대로 " + Pid.Show(before)));
+                        return;
+                    }
+                    AddEvent(new Ev(DateTime.Now, "상태", "PID 자동 조정 끝 — 예전 " + Pid.Show(before) + " → 새 값 " + Pid.Show(after)));
+                    BeginInvoke((Action)(() =>
+                    {
+                        if (MessageBox.Show(this, "PID 자동 조정이 끝났습니다. 새 값은 지금 바로 쓰이고 있습니다.\n\n예전: " + Pid.Show(before) + "\n새 값: " + Pid.Show(after)
+                            + "\n\n전원을 껐다 켜도 유지되게 저장(M500)할까요?\n(아니요를 누르면 껐다 켤 때 예전 값으로 돌아갑니다)", "PID 자동 조정", MessageBoxButtons.YesNo) == DialogResult.Yes)
+                            Cmd("M500");
+                    }));
+                }
+            }
         }
 
         // ---------- 업데이트 ----------

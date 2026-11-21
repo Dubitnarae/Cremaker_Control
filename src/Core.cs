@@ -359,6 +359,7 @@ namespace CremakerControl
         public int ZSteps;            // 출력 Z 가 올라간 횟수 (파일 없을 때 층 수 대신)
         DateTime lastPrinting;
         PrinterState prev;
+        public DateTime LastPrinting { get { return lastPrinting; } }
 
         // 끝난 것으로 보는 시간: 일시정지·긴 이동에 끊기지 않게 넉넉히
         public double EndAfter = 60;

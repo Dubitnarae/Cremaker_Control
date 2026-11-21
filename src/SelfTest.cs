@@ -215,6 +215,52 @@ namespace CremakerControl
                 && File.ReadAllLines(Path.Combine(dir, "210507_events.csv"), Encoding.UTF8)[1].Contains("노즐 목표"));
             Directory.Delete(tmp, true);
 
+            // v0.2.0 온도 이상 감시: 목표 도달 전엔 조용, 도달 뒤 노즐 -8 이 10초 이어지면 경고 한 번, 돌아오면 회복
+            var tw = new TempWatch();
+            var tw0 = new DateTime(2026, 11, 21, 1, 0, 0);
+            var ts1 = new PrinterState { T = 150, Tt = 205, B = 60, Bt = 60 };
+            Check("온도 감시: 가열 중엔 경고 없음", tw.Update(ts1, tw0).Count == 0);
+            ts1.T = 204.5; tw.Update(ts1, tw0.AddSeconds(60));
+            ts1.T = 197; var w1 = tw.Update(ts1, tw0.AddSeconds(61)); var w2 = tw.Update(ts1, tw0.AddSeconds(70)); var w3 = tw.Update(ts1, tw0.AddSeconds(72));
+            Check("온도 감시: 10초 넘게 처지면 경고 한 번", w1.Count == 0 && w2.Count == 0 && w3.Count == 1 && w3[0].Source == "경고" && tw.Update(ts1, tw0.AddSeconds(80)).Count == 0);
+            ts1.T = 204; var w4 = tw.Update(ts1, tw0.AddSeconds(90));
+            Check("온도 감시: 돌아오면 회복 기록", w4.Count == 1 && w4[0].Source == "상태");
+            ts1.Tt = 215; ts1.T = 204;
+            Check("온도 감시: 목표 바꾸면 다시 도달부터", tw.Update(ts1, tw0.AddSeconds(100)).Count == 0 && tw.Update(ts1, tw0.AddSeconds(200)).Count == 0);
+
+            // 출력 기록장
+            Check("필라멘트 무게 (1.75 mm PLA 1 m ≈ 2.98 g)", Math.Abs(JobRecord.Grams(1, 1.75, 1.24) - 2.982) < 0.01);
+            var jr = new JobRecord { Start = tw0, End = tw0.AddMinutes(190), File = "a,b.gcode", Expected = 189 * 60, ExtrudedM = 2.5, Result = "완료", Memo = "말 \"따옴표\"" };
+            var cells = jr.Row(1.75, 1.24, 20000);
+            Check("출력 기록 줄 값", cells[2] == "3:10" && cells[4] == "3:09" && cells[5] == "1.01" && cells[6] == "2.50" && cells[7] == "7.5" && cells[8] == "149");
+            Check("CSV 쉼표·따옴표 왕복", JobLog.Split(JobLog.Line(cells)).SequenceEqual(cells));
+            string jp = Path.Combine(Path.GetTempPath(), "cc_joblog_test.csv");
+            if (File.Exists(jp)) File.Delete(jp);
+            JobLog.Append(jp, cells); JobLog.Append(jp, cells);
+            var jrows = JobLog.Read(jp); jrows[1][10] = "고침"; JobLog.Write(jp, jrows);
+            var jrows2 = JobLog.Read(jp);
+            Check("출력 기록 파일 쓰기·고치기", jrows2.Count == 2 && jrows2[1][10] == "고침" && jrows2[0][3] == "a,b.gcode" && File.ReadAllBytes(jp)[0] == 0xEF);
+            File.Delete(jp);
+            var ng = new NotifyGate();
+            Check("알림 중복 막기", ng.Allow("end", tw0, 600) && !ng.Allow("end", tw0.AddSeconds(100), 600) && ng.Allow("pause", tw0, 60) && ng.Allow("end", tw0.AddSeconds(601), 600));
+
+            // PID (Marlin 2.0.8 M301 응답·M303 끝 문구)
+            var pv = Pid.FromM301("echo: p:22.20 i:1.08 d:114.00");
+            Check("PID M301 읽기", pv != null && pv[0] == 22.2 && pv[1] == 1.08 && pv[2] == 114);
+            Check("PID 다른 줄은 안 읽음", Pid.FromM301(" Kp: 20.56 Ki: 1.10 Kd: 96.08") == null && Pid.FromM301("echo:  M301 P22.20 I1.08 D114.00") == null && Pid.FromM301(" bias: 92 d: 92 min: 196.56 max: 203.75") == null);
+            Check("PID 끝·실패 문구", Pid.Finished("PID Autotune finished! Put the last Kp, Ki and Kd constants from below into Configuration.h") && Pid.Failed("PID Autotune failed! timeout"));
+
+            // 드라이버 점검: 움직이는 축 열만, 전부 0 이면 고장 의심, Z 200 미만 주의
+            var dc = new DriverCheck();
+            foreach (var l in new[] { ">M122", "<sg_result		0	0	0	0", "<Testing X connection... OK", "<Testing Y connection... OK", "<Testing Z connection... OK", "<Testing E connection... OK",
+                ">G91", ">G1 X60 F3000", "<sg_result		62	0	0	0", "<sg_result		216	0	0	0", ">G90",
+                ">G1 Y60 F3000", "<sg_result		0	0	0	0", "<sg_result		0	0	0	0", ">G90",
+                ">G1 Z10 F240", "<sg_result		0	0	180	0", "<sg_result		0	0	0	0", ">G90", "<Testing X connection... OK" })
+                if (l[0] == '>') dc.Sent(l.Substring(1)); else dc.Got(l.Substring(1));
+            bool dbad;
+            var drep = dc.Report(out dbad);
+            Check("드라이버 점검 판정", dbad && drep.Count == 7 && drep[4].Contains("62 ~ 216") && drep[4].EndsWith("정상") && drep[5].Contains("고장 의심") && drep[6].Contains("180 ~ 180") && drep[6].Contains("주의"));
+
             // 업데이트
             Check("버전 비교", Updater.IsNewer("0.1.1", "0.1.0") && !Updater.IsNewer("0.1.0", "0.1.0") && Updater.IsNewer("v0.10.0", "0.9.9"));
             Check("SHA256 검사", Updater.Verified(Encoding.ASCII.GetBytes("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  x.exe")
