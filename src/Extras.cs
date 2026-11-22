@@ -1,4 +1,4 @@
-// v0.2.0 추가 기능 — 알림(Windows·텔레그램), 출력 기록장, 온도 이상 감시, PID 자동 조정 결과 읽기, 드라이버 점검 결과 읽기.
+﻿// v0.2.0 추가 기능 — 알림(Windows·텔레그램), 출력 기록장, 온도 이상 감시, PID 자동 조정 결과 읽기, 드라이버 점검 결과 읽기.
 // 화면과 상관없는 부분만 여기 두고 --selftest 로 시험한다. 화면 연결은 MainForm.
 
 using System;
@@ -191,20 +191,26 @@ namespace CremakerControl
     }
 
     // 드라이버 점검: 축을 움직이는 동안 M122 의 sg_result(부하 값, 클수록 가벼움) 를 모은다. 열 순서 X Y Z E.
-    // 2026-11-19·20 실제 고장 모듈 두 개는 움직여도 항상 0 이었다. Z 는 제조사 충돌 보호가 200 미만 1초면 원점 실패로 멈춘다.
+    // 2026-11-19·20 실제 고장 모듈 두 개는 움직여도 항상 0 이었다. Z 는 제조사 충돌 보호가 Z 원점(아래로) 중 200 미만 1초면 멈춘다.
+    // 2026-11-22 실기: sg_result 는 멈춘 뒤에도 마지막 값이 남고(0 으로 안 돌아감), 멈추는 순간엔 16~66 처럼 낮게 찍힌다.
+    // 그래서 같은 M122 의 tstep 이 "max"(멈춤)인 축 값은 버리고, Z 판정은 아래로 갈 때의 중간값으로 한다.
     class DriverCheck
     {
         static readonly Regex RxSg = new Regex(@"^sg_result\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)");
+        static readonly Regex RxTstep = new Regex(@"^tstep\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)");
         static readonly Regex RxConn = new Regex(@"Testing (\w+) connection\.\.\.\s*(.*)$");
         static readonly string[] Axes = { "X", "Y", "Z", "E" };
         public string Moving = "";   // 지금 움직이는 축 (보낸 G1 줄로 정함)
+        bool down;                   // 지금 움직임이 - 방향인지 (Z 는 아래)
+        string[] tstep;              // 바로 앞 tstep 줄 (M122 안에서 sg_result 보다 먼저 온다)
         public readonly Dictionary<string, List<int>> Sg = new Dictionary<string, List<int>>();
+        public readonly List<int> ZDown = new List<int>();
         public readonly List<string> Conn = new List<string>();
 
         public void Sent(string cmd)
         {
-            var m = Regex.Match(cmd, @"^G1 ([XYZ])");
-            if (m.Success) Moving = m.Groups[1].Value;
+            var m = Regex.Match(cmd, @"^G1 ([XYZ])(-?)");
+            if (m.Success) { Moving = m.Groups[1].Value; down = m.Groups[2].Value == "-"; }
             else if (cmd == "G90") Moving = "";
         }
 
@@ -212,12 +218,21 @@ namespace CremakerControl
         {
             var c = RxConn.Match(line);
             if (c.Success) { string t = c.Groups[1].Value + " 통신 " + c.Groups[2].Value.Trim(); if (!Conn.Contains(t)) Conn.Add(t); return; }
+            var ts = RxTstep.Match(line);
+            if (ts.Success) { tstep = new[] { ts.Groups[1].Value, ts.Groups[2].Value, ts.Groups[3].Value, ts.Groups[4].Value }; return; }
             var m = RxSg.Match(line);
             if (!m.Success || Moving == "") return;
             int col = Array.IndexOf(Axes, Moving);
+            bool moving = tstep == null || tstep[col] != "max";
+            tstep = null;
+            if (!moving) return;   // 멈춘 뒤 남아 있는 값
+            int v = int.Parse(m.Groups[col + 1].Value, Parser.Inv);
             if (!Sg.ContainsKey(Moving)) Sg[Moving] = new List<int>();
-            Sg[Moving].Add(int.Parse(m.Groups[col + 1].Value, Parser.Inv));
+            Sg[Moving].Add(v);
+            if (Moving == "Z" && down) ZDown.Add(v);
         }
+
+        static int Median(List<int> v) { var s = v.OrderBy(x => x).ToList(); return s[s.Count / 2]; }
 
         // 결과 문장들과, 문제가 있으면 bad = true
         public List<string> Report(out bool bad)
@@ -228,13 +243,16 @@ namespace CremakerControl
             foreach (var a in new[] { "X", "Y", "Z" })
             {
                 List<int> v;
-                if (!Sg.TryGetValue(a, out v) || v.Count == 0) { res.Add(a + ": 값을 못 받음 (움직이지 않았거나 응답이 늦음)"); bad = true; continue; }
-                // 0 은 멈춘 순간에 읽힌 값일 수도 있어 범위에서 뺀다. 전부 0 이면 고장 의심.
-                var nz = v.Where(x => x > 0).ToList();
-                string range = a + " 움직이는 중 sg_result " + (nz.Count > 0 ? nz.Min() + " ~ " + nz.Max() : "0") + " (" + v.Count + "번 읽음" + (nz.Count < v.Count ? ", 0 은 " + (v.Count - nz.Count) + "번" : "") + ")";
-                if (nz.Count == 0) { res.Add(range + " — 고장 의심: 막힘 감지 신호가 없음 (예전 불량 모듈과 같은 증상)"); bad = true; }
-                else if (a == "Z" && nz.Min() < 200) { res.Add(range + " — 주의: 200 아래가 1초 넘으면 Z 원점이 '실패'로 멈춤"); bad = true; }
-                else res.Add(range + " — 정상");
+                if (!Sg.TryGetValue(a, out v) || v.Count == 0) { res.Add(a + ": 움직이는 중 값을 못 받음 (움직이지 않았거나 응답이 늦음)"); bad = true; continue; }
+                string range = a + " 움직이는 중 sg_result " + v.Min() + " ~ " + v.Max() + " (" + v.Count + "번 읽음)";
+                if (v.Max() == 0) { res.Add(range + " — 고장 의심: 막힘 감지 신호가 없음 (예전 불량 모듈과 같은 증상)"); bad = true; continue; }
+                if (a == "Z" && ZDown.Count > 0)
+                {
+                    int md = Median(ZDown);
+                    range += ", 내려갈 때 중간값 " + md;
+                    if (md < 200) { res.Add(range + " — 주의: Z 원점 때 200 아래가 1초 넘으면 '원점 이동 실패'로 멈춤"); bad = true; continue; }
+                }
+                res.Add(range + " — 정상");
             }
             return res;
         }

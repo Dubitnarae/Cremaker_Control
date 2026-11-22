@@ -127,4 +127,80 @@ namespace CremakerControl
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.WordBreak);
         }
     }
+
+    // 머리(탭 줄)·테두리 없는 TabControl — 페이지 전환은 위의 SegBar 가 한다
+    class BareTabs : TabControl
+    {
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == 0x1328 && !DesignMode) { m.Result = (IntPtr)1; return; }   // TCM_ADJUSTRECT: 페이지가 전체 영역을 쓰게
+            base.WndProc(ref m);
+        }
+
+        // 부모에 SegBar 를 위에 붙인다 (이 컨트롤을 부모에 넣은 뒤 부른다)
+        public void AttachBar()
+        {
+            var bar = new SegBar(this) { Dock = DockStyle.Top, Height = 38 };
+            Parent.Controls.Add(bar);
+            BringToFront();   // Fill 이 마지막에 자리 잡게
+        }
+    }
+
+    // 애플풍 세그먼트 막대: 회색 둥근 바탕 위에 고른 탭만 흰 둥근 칸
+    class SegBar : Control
+    {
+        readonly TabControl tc;
+        readonly System.Collections.Generic.List<Rectangle> cells = new System.Collections.Generic.List<Rectangle>();
+
+        public SegBar(TabControl tc)
+        {
+            this.tc = tc;
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            Cursor = Cursors.Hand;
+            tc.SelectedIndexChanged += (s, e) => Invalidate();
+        }
+
+        void Layout2(Graphics g)
+        {
+            cells.Clear();
+            int x = 10;
+            foreach (TabPage p in tc.TabPages)
+            {
+                int w = TextRenderer.MeasureText(g, p.Text, Font).Width + 28;
+                cells.Add(new Rectangle(x, 7, w, Height - 12));
+                x += w;
+            }
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.Clear(Parent != null ? Parent.BackColor : Theme.Bg);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            Layout2(g);
+            if (cells.Count == 0) return;
+            var all = Rectangle.FromLTRB(cells[0].Left - 3, cells[0].Top - 3, cells[cells.Count - 1].Right + 3, cells[0].Bottom + 3);
+            using (var path = Theme.Round(all, 9))
+            using (var b = new SolidBrush(Theme.Fill))
+                g.FillPath(b, path);
+            for (int i = 0; i < cells.Count; i++)
+            {
+                bool sel = i == tc.SelectedIndex;
+                if (sel)
+                    using (var path = Theme.Round(cells[i], 7))
+                    using (var b = new SolidBrush(Theme.Card))
+                    using (var p = new Pen(Theme.Line))
+                    { g.FillPath(b, path); g.DrawPath(p, path); }
+                using (var f = new Font(Font, sel ? FontStyle.Bold : FontStyle.Regular))
+                    TextRenderer.DrawText(g, tc.TabPages[i].Text, f, cells[i], sel ? Theme.Text : Theme.Sub,
+                        TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+            }
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            for (int i = 0; i < cells.Count; i++) if (cells[i].Contains(e.Location)) tc.SelectedIndex = i;
+            base.OnMouseDown(e);
+        }
+    }
 }

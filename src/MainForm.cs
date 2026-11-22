@@ -1,4 +1,4 @@
-// 화면 — 왼쪽 상태, 가운데 온도 그래프 + 사건 기록/통신 콘솔, 오른쪽 조작.
+﻿// 화면 — 왼쪽 상태, 가운데 온도 그래프 + 사건 기록/통신 콘솔, 오른쪽 조작.
 // 통신 스레드는 받은 줄을 큐에 넣기만 하고, 해석·감지·로그·화면 갱신은 0.2초 타이머에서 한꺼번에 한다
 // (줄마다 화면을 부르면 화면 스레드가 막힌다 — RSP_Logger 에서 겪은 일).
 
@@ -194,7 +194,7 @@ namespace CremakerControl
             AddSeries("노즐 목표", Color.FromArgb(255, 205, 140), 1);
             AddSeries("베드", Theme.Accent, 2);
             AddSeries("베드 목표", Color.FromArgb(140, 190, 255), 1);
-            topTabs = new TabControl { Dock = DockStyle.Fill };
+            topTabs = new BareTabs { Dock = DockStyle.Fill };
             var tpChart = new TabPage("온도 그래프");
             tpChart.Controls.Add(chart);
             tp3d = new TabPage("3D 진행 보기");
@@ -204,8 +204,9 @@ namespace CremakerControl
             topTabs.TabPages.Add(tp3d);
             topTabs.SelectedIndexChanged += (s, e) => last3d = DateTime.MinValue;
             split.Panel1.Controls.Add(topTabs);
+            ((BareTabs)topTabs).AttachBar();
 
-            var tabs = new TabControl { Dock = DockStyle.Fill };
+            var tabs = new BareTabs { Dock = DockStyle.Fill };
             var tpEv = new TabPage("사건 기록 (PC·프린터 조작)");
             lvEvents = new ListView { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, GridLines = true };
             lvEvents.Columns.Add("시각", 80);
@@ -237,6 +238,7 @@ namespace CremakerControl
             tabs.TabPages.Add(tpCon);
             tabs.TabPages.Add(tpJobs);
             split.Panel2.Controls.Add(tabs);
+            tabs.AttachBar();
 
             Controls.Add(split);
             Controls.Add(right);
@@ -529,7 +531,12 @@ namespace CremakerControl
                 if (!conn && job.On) Notify("연결 끊김", "출력 중에 프린터와 USB 연결이 끊겼습니다. (출력 자체는 화면이 계속할 수 있음)", "conn", 300);
                 wasConnected = conn; SyncButtons();
             }
-            if (link != null) lbConn.Text = conn ? link.Port + " 연결됨 · 기록 중" : link.Port + " 연결 기다리는 중 (3초마다 다시 시도)";
+            if (link != null)
+            {
+                string busy = link.Busy;
+                lbConn.Text = conn ? link.Port + " 연결됨 · 기록 중" : busy != "" ? link.Port + ": " + busy : link.Port + " 연결 기다리는 중 (3초마다 다시 시도)";
+                lbConn.ForeColor = !conn && busy != "" ? Theme.Red : Theme.Text;
+            }
 
             if (conn && (now - lastPoll).TotalSeconds >= 5 && link.Pending == 0)
             {
@@ -897,13 +904,14 @@ namespace CremakerControl
         void StartDriverCheck()
         {
             if (!CanRunTool()) return;
-            if (MessageBox.Show(this, "드라이버 · 원점 점검\n\n각 축을 조금 움직이며(X·Y 60 mm 왕복, Z 10 mm 위로 갔다 내려옴) 드라이버 통신과 막힘 감지 신호(sg_result)를 읽습니다. 원점은 잡지 않습니다.\n\n시작 전에 헤드를 가운데 쪽(오른쪽·뒤쪽 끝에서 60 mm 넘게 떨어진 곳)에 두고, 베드 위에 물건이 없게 하세요.\n\n시작할까요?",
+            if (MessageBox.Show(this, "드라이버 · 원점 점검\n\n각 축을 조금 움직이며(X·Y 60 mm 왕복, Z 20 mm 위로 갔다 내려옴) 드라이버 통신과 막힘 감지 신호(sg_result)를 읽습니다. 원점은 잡지 않습니다.\n\n시작 전에 헤드를 가운데 쪽(오른쪽·뒤쪽 끝에서 60 mm 넘게 떨어진 곳)에 두고, 베드 위에 물건이 없게 하세요.\n\n시작할까요?",
                 App.Name, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
             drv = new DriverCheck();
             drvOn = true;
             var c = new StringBuilder("M122\n");
-            foreach (var a in new[] { "X", "Y" }) c.Append("G91\nG1 " + a + "60 F3000\nM122\nM122\nM122\nG1 " + a + "-60 F3000\nM122\nM122\nM122\nG90\nM400\n");
-            c.Append("G91\nG1 Z10 F240\nM122\nM122\nM122\nG1 Z-10 F240\nM122\nM122\nM122\nG90\nM400\n");
+            // M122 한 번에 약 1초 — 움직이는 동안 여러 번 읽히게 X·Y 30 mm/s(2초), Z 4 mm/s 20 mm(5초)
+            foreach (var a in new[] { "X", "Y" }) c.Append("G91\nG1 " + a + "60 F1800\nM122\nM122\nM122\nG1 " + a + "-60 F1800\nM122\nM122\nM122\nG90\nM400\n");
+            c.Append("G91\nG1 Z20 F240\nM122\nM122\nM122\nM122\nM122\nG1 Z-20 F240\nM122\nM122\nM122\nM122\nM122\nG90\nM400\n");
             c.Append("M118 P2 CC_DRVCHK_END");   // P2 = USB 로만 (화면에 안 뜨게)
             Cmd(c.ToString());
         }

@@ -1,4 +1,4 @@
-// --selftest : 해석·조작 감지·로그 줄·업데이트 비교를 검사한다. 줄들은 2026-11-19 실제 프린터에서 받은 것.
+﻿// --selftest : 해석·조작 감지·로그 줄·업데이트 비교를 검사한다. 줄들은 2026-11-19 실제 프린터에서 받은 것.
 
 using System;
 using System.Collections.Generic;
@@ -250,16 +250,24 @@ namespace CremakerControl
             Check("PID 다른 줄은 안 읽음", Pid.FromM301(" Kp: 20.56 Ki: 1.10 Kd: 96.08") == null && Pid.FromM301("echo:  M301 P22.20 I1.08 D114.00") == null && Pid.FromM301(" bias: 92 d: 92 min: 196.56 max: 203.75") == null);
             Check("PID 끝·실패 문구", Pid.Finished("PID Autotune finished! Put the last Kp, Ki and Kd constants from below into Configuration.h") && Pid.Failed("PID Autotune failed! timeout"));
 
-            // 드라이버 점검: 움직이는 축 열만, 전부 0 이면 고장 의심, Z 200 미만 주의
+            // 드라이버 점검 (2026-11-22 실기 줄 형식): tstep max 인 값(멈춘 뒤 남은 값)은 버림, 전부 0 이면 고장 의심, Z 는 내려갈 때 중간값 200 미만이면 주의
+            Func<string, string, string> M = (ts, sg) => "<tstep		" + ts + "|<sg_result	" + sg;
             var dc = new DriverCheck();
-            foreach (var l in new[] { ">M122", "<sg_result		0	0	0	0", "<Testing X connection... OK", "<Testing Y connection... OK", "<Testing Z connection... OK", "<Testing E connection... OK",
-                ">G91", ">G1 X60 F3000", "<sg_result		62	0	0	0", "<sg_result		216	0	0	0", ">G90",
-                ">G1 Y60 F3000", "<sg_result		0	0	0	0", "<sg_result		0	0	0	0", ">G90",
-                ">G1 Z10 F240", "<sg_result		0	0	180	0", "<sg_result		0	0	0	0", ">G90", "<Testing X connection... OK" })
-                if (l[0] == '>') dc.Sent(l.Substring(1)); else dc.Got(l.Substring(1));
+            var dl = new List<string> { ">M122", "<tstep		max	max	max	max", "<sg_result	0	0	0	0", "<Testing X connection... OK", "<Testing Y connection... OK", "<Testing Z connection... OK", "<Testing E connection... OK", ">G91", ">G1 X60 F1800" };
+            foreach (var s2 in new[] { M("189	max	max	max", "228	0	0	0"), M("max	max	max	max", "64	0	0	0"), ">G1 X-60 F1800", M("189	max	max	max", "200	0	0	0"), ">G90",
+                ">G1 Y60 F1800", M("max	189	max	max", "200	0	0	0"), ">G90",
+                ">G1 Z20 F240", M("max	max	235	max", "200	0	210	0"), ">G1 Z-20 F240", M("max	max	438	max", "200	0	240	0"), M("max	max	235	max", "200	0	150	0"), M("max	max	237	max", "200	0	30	0"), ">G90" })
+                dl.AddRange(s2.Split('|'));
+            foreach (var l in dl) if (l[0] == '>') dc.Sent(l.Substring(1)); else dc.Got(l.Substring(1));
             bool dbad;
             var drep = dc.Report(out dbad);
-            Check("드라이버 점검 판정", dbad && drep.Count == 7 && drep[4].Contains("62 ~ 216") && drep[4].EndsWith("정상") && drep[5].Contains("고장 의심") && drep[6].Contains("180 ~ 180") && drep[6].Contains("주의"));
+            Check("드라이버 점검 판정", dbad && drep.Count == 7 && drep[4].Contains("200 ~ 228") && drep[4].Contains("2번") && drep[4].EndsWith("정상")
+                && drep[5].Contains("고장 의심") && drep[6].Contains("중간값 150") && drep[6].Contains("주의"));
+            var dc2 = new DriverCheck();
+            foreach (var l in new[] { ">G1 Z-20 F240", "<tstep		max	max	235	max", "<sg_result	0	0	236	0", "<tstep		max	max	237	max", "<sg_result	0	0	30	0", "<tstep		max	max	240	max", "<sg_result	0	0	240	0" })
+                if (l[0] == '>') dc2.Sent(l.Substring(1)); else dc2.Got(l.Substring(1));
+            var drep2 = dc2.Report(out dbad);
+            Check("드라이버 점검 Z 멈추는 순간 낮은 값은 중간값으로 무시", drep2[2].Contains("중간값 236") && drep2[2].EndsWith("정상"));
 
             // 업데이트
             Check("버전 비교", Updater.IsNewer("0.1.1", "0.1.0") && !Updater.IsNewer("0.1.0", "0.1.0") && Updater.IsNewer("v0.10.0", "0.9.9"));

@@ -18,6 +18,15 @@ namespace CremakerControl
         public volatile bool Connected;
         public Action<string, string> OnLine;   // (방향 "<" 받음 / ">" 보냄, 줄)
         public Action<string> OnInfo;           // 연결·끊김 안내
+        public volatile string Busy = "";       // 포트를 다른 프로그램이 쓰는 중이면 그 안내 (아니면 "")
+
+        // 포트를 잡을 만한 프로그램이 켜져 있으면 그 이름으로 안내
+        static string OtherUser()
+        {
+            foreach (var n in new[] { "UltiMaker-Cura", "Cura", "OrcaSlicer", "PrusaSlicer", "pronterface", "Repetier-Host" })
+                if (System.Diagnostics.Process.GetProcessesByName(n).Length > 0) { string s = n.Replace("UltiMaker-", ""); return s + " 가 쓰는 중 — " + s + " 를 끄세요"; }
+            return "다른 프로그램이 포트를 쓰는 중";
+        }
 
         SerialPort sp;
         Thread reader, writer;
@@ -116,8 +125,9 @@ namespace CremakerControl
                 lock (writeLock) s = sp;
                 if (s == null)
                 {
-                    try { Open(); }
-                    catch (Exception) { Sleep(3000); }   // 프린터 꺼짐·USB 빠짐: 3초마다 다시 시도
+                    try { Open(); Busy = ""; }
+                    catch (UnauthorizedAccessException) { Busy = OtherUser(); Sleep(3000); }   // 다른 프로그램이 포트를 잡고 있음 (2026-11-22 Cura 가 COM3 을 잡았던 일)
+                    catch (Exception) { Busy = ""; Sleep(3000); }   // 프린터 꺼짐·USB 빠짐: 3초마다 다시 시도
                     continue;
                 }
                 string line;
