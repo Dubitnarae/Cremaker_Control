@@ -15,3 +15,4 @@ $nf = New-TemporaryFile; [IO.File]::WriteAllText($nf, $notes)  # BOM 없이
 git tag -f "v$ver"; git push -f origin "v$ver"
 gh release create "v$ver" dist\Cremaker_Control.exe dist\Cremaker_Control.exe.sha256 --title "Cremaker Control v$ver" --notes-file $nf
 Remove-Item $nf
+& .\verify_release.ps1 -Repo Dubitnarae/Cremaker_Control -Tag "v$ver" -Files dist\Cremaker_Control.exe, dist\Cremaker_Control.exe.sha256
